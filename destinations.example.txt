@@ -1,0 +1,6 @@
+# One destination profile or namespace URL per line.
+# Copy this file to destinations.txt and edit it for your migration.
+
+https://gitlab.com/example-namespace
+https://codeberg.org/example-user
+https://git.sr.ht/~example-user

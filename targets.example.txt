@@ -1,0 +1,5 @@
+# One GitHub profile URL per line.
+# Copy this file to targets.txt and edit it for your migration.
+
+https://github.com/example-user
+https://github.com/example-org

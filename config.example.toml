@@ -1,0 +1,69 @@
+workspace = ".aghm"
+dry_run = false
+verbose = 0
+tui = true
+insecure_tls = false
+
+[github]
+# Copy targets.example.txt to targets.txt, then edit targets.txt for your run.
+profiles_file = "targets.txt"
+tokens = [
+  { env = "GITHUB_TOKEN", name = "github-primary" },
+  # { env = "GITHUB_TOKEN_2", name = "github-secondary" },
+]
+
+[backup]
+local_dir = "backups"
+clone_protocol = "https"
+include_archived = true
+include_forks = true
+include_private_for_authenticated_user = true
+lfs = false
+push_mode = "mirror"
+
+[retry]
+max_retries = 5
+base_delay_seconds = 1.5
+max_delay_seconds = 60
+request_timeout_seconds = 15
+rate_limit_sleep_seconds = 300
+wait_on_rate_limit = true
+
+[git]
+author_name = "anti-GH-MS-hysteria"
+author_email = "anti-gh-ms-hysteria@localhost"
+commit_message = "Add anti-GH-MS-hysteria backup marker"
+# ssh_identity_file = "/home/user/.ssh/sourcehut_ed25519"
+# ssh_identities_only = true
+# ssh_batch_mode = false
+# ssh_strict_host_key_checking = "accept-new"
+# ssh_command = "ssh -i /home/user/.ssh/sourcehut_ed25519 -o IdentitiesOnly=yes"
+
+[[destinations]]
+url = "https://gitlab.com/extencil"
+platform = "gitlab"
+tokens = [{ env = "GITLAB_TOKEN", name = "gitlab-primary" }]
+visibility = "mirror"
+push_mode = "mirror"
+
+[[destinations]]
+url = "https://codeberg.org/extencil"
+platform = "forgejo"
+tokens = [{ env = "CODEBERG_TOKEN", username = "extencil" }]
+visibility = "mirror"
+push_mode = "mirror"
+
+[[destinations]]
+url = "https://bitbucket.org/extencil"
+platform = "bitbucket"
+tokens = [{ env = "BITBUCKET_TOKEN", username = "you@example.com" }]
+visibility = "mirror"
+push_mode = "mirror"
+
+[[destinations]]
+url = "https://git.sr.ht/~extencil"
+platform = "sourcehut"
+tokens = [{ env = "SOURCEHUT_TOKEN", name = "sourcehut-primary" }]
+visibility = "mirror"
+push_mode = "mirror"
+push_url_template = "git@git.sr.ht:~{owner}/{repo}"
