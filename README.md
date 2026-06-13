@@ -333,6 +333,21 @@ commit if needed, creates destination repositories, and pushes the local mirrors
 When AGMH has to scan local mirrors without state metadata, repository privacy is
 unknown, so it treats those repositories as private by default.
 
+By default, remote mirror follows the source repository visibility. You can
+override destination visibility for the whole remote mirror run:
+
+```bash
+agmh remote-mirror --config agmh.config.toml --destination-visibility mirror
+agmh remote-mirror --config agmh.config.toml --destination-visibility public
+agmh remote-mirror --config agmh.config.toml --destination-visibility private
+```
+
+`mirror` applies the same visibility recorded from the source. `public` creates
+destination repositories as public regardless of source visibility. `private`
+creates destination repositories as private regardless of source visibility. If
+a destination repository already exists, AGMH uses the existing repository as-is.
+The same override is available with `agmh run --mode remote`.
+
 You can also set the mode in TOML:
 
 ```toml

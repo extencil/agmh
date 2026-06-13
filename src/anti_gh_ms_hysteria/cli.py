@@ -73,7 +73,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command")
 
     run = sub.add_parser("run", help="discover, back up, annotate, and mirror repositories")
-    add_runtime_args(run)
+    add_runtime_args(run, destination_visibility=True)
     run.set_defaults(handler=run_command)
 
     local = sub.add_parser("local-mirror", help="clone or update local mirrors without pushing anywhere")
@@ -81,7 +81,7 @@ def build_parser() -> argparse.ArgumentParser:
     local.set_defaults(handler=run_command, workflow_mode="local")
 
     remote = sub.add_parser("remote-mirror", help="push previously cloned local mirrors to destinations")
-    add_runtime_args(remote, mode=False)
+    add_runtime_args(remote, mode=False, destination_visibility=True)
     remote.set_defaults(handler=run_command, workflow_mode="remote")
 
     discover = sub.add_parser("discover", help="list accessible GitHub repositories")
@@ -105,6 +105,7 @@ def add_runtime_args(
     parser: argparse.ArgumentParser,
     destinations: bool = True,
     mode: bool = True,
+    destination_visibility: bool = False,
 ) -> None:
     parser.add_argument("--config", type=Path, help="TOML config file")
     if mode:
@@ -147,6 +148,17 @@ def add_runtime_args(
     if destinations:
         parser.add_argument("--destinations", type=Path, help="text file with one destination profile URL per line")
         parser.add_argument("--destination", action="append", default=[], help="destination profile URL; repeatable")
+        if destination_visibility:
+            parser.add_argument(
+                "--destination-visibility",
+                "--remote-visibility",
+                dest="destination_visibility",
+                choices=["mirror", "public", "private"],
+                help=(
+                    "remote mirror destination visibility: mirror follows source visibility, "
+                    "public forces every destination repo public, private forces every destination repo private"
+                ),
+            )
         parser.add_argument(
             "--destination-token",
             action="append",
@@ -269,6 +281,12 @@ def build_config_from_args(args: argparse.Namespace, include_destinations: bool)
     if include_destinations and cfg.mode != "local":
         apply_destinations_file(cfg, args.destinations)
         cfg.destinations.extend(destination_from_url(url) for url in args.destination)
+        destination_visibility = getattr(args, "destination_visibility", None)
+        if destination_visibility:
+            if cfg.mode != "remote":
+                raise ConfigError("--destination-visibility is only valid in remote mirror mode")
+            for dest in cfg.destinations:
+                dest.visibility = destination_visibility
         destination_tokens = [parse_destination_token(value) for value in args.destination_token]
         for platform, token in destination_tokens:
             matched = False

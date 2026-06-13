@@ -14,6 +14,7 @@ from anti_gh_ms_hysteria.config import (
     parse_cli_token,
     parse_destination_token,
 )
+from anti_gh_ms_hysteria.cli import build_config_from_args, build_parser
 from anti_gh_ms_hysteria.destinations.gitlab import GitLabDestination
 from anti_gh_ms_hysteria.destinations.gitlab import gitlab_safe_project_path
 from anti_gh_ms_hysteria.git_ops import GitMirrorManager, build_git_ssh_command, git_failure_hint
@@ -316,6 +317,26 @@ class DestinationMappingTests(unittest.TestCase):
         self.assertIsNotNone(hint)
         self.assertIn("portable-mirror", hint or "")
 
+    def test_destination_visibility_override_semantics(self) -> None:
+        repo = repo_info()
+        private_repo = RepoInfo(**{**repo.__dict__, "private": True})
+        public_repo = RepoInfo(**{**repo.__dict__, "private": False})
+        destination = GitLabDestination(
+            DestinationConfig(url="gitlab.com/group", platform="gitlab", owner="group"),
+            AppConfig(),
+            DummyUI(),
+        )
+
+        destination.dest.visibility = "mirror"
+        self.assertEqual(destination.visibility_for(private_repo), "private")
+        self.assertEqual(destination.visibility_for(public_repo), "public")
+
+        destination.dest.visibility = "public"
+        self.assertEqual(destination.visibility_for(private_repo), "public")
+
+        destination.dest.visibility = "private"
+        self.assertEqual(destination.visibility_for(public_repo), "private")
+
 
 class RunnerTests(unittest.TestCase):
     def test_run_fails_when_source_discovery_fails(self) -> None:
@@ -391,6 +412,40 @@ class RunnerTests(unittest.TestCase):
 
         self.assertEqual(result, 0)
         self.assertEqual(pushes, [(mirror_path, "https://gitlab.com/owner/repo.git", "mirror", "main")])
+
+    def test_remote_visibility_flag_overrides_destination_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "aghm.config.toml"
+            config_path.write_text(
+                "\n".join(
+                    [
+                        'mode = "remote"',
+                        "[[destinations]]",
+                        'url = "https://gitlab.com/owner"',
+                        'platform = "gitlab"',
+                        'visibility = "private"',
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            args = build_parser().parse_args(
+                [
+                    "remote-mirror",
+                    "--config",
+                    str(config_path),
+                    "--destination-visibility",
+                    "public",
+                ]
+            )
+            cfg = build_config_from_args(args, include_destinations=True)
+
+        self.assertEqual(cfg.mode, "remote")
+        self.assertEqual([dest.visibility for dest in cfg.destinations], ["public"])
+
+    def test_destination_visibility_flag_requires_remote_mode(self) -> None:
+        args = build_parser().parse_args(["run", "--destination-visibility", "public"])
+        with self.assertRaises(ConfigError):
+            build_config_from_args(args, include_destinations=True)
 
 
 if __name__ == "__main__":
