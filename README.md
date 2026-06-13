@@ -3,21 +3,20 @@
 ![License: Unlicense](https://img.shields.io/badge/license-Unlicense-blue.svg)
 ![Python](https://img.shields.io/badge/python-3.11%2B-3776ab.svg)
 ![CLI](https://img.shields.io/badge/interface-CLI%20%2B%20TUI-111111.svg)
-![GitHub](https://img.shields.io/badge/source-GitHub-181717.svg)
-![GitLab](https://img.shields.io/badge/destination-GitLab-fc6d26.svg)
-![Codeberg](https://img.shields.io/badge/destination-Codeberg-2185d0.svg)
-![SourceHut](https://img.shields.io/badge/destination-SourceHut-000000.svg)
+![Sources](https://img.shields.io/badge/sources-GitHub%20%7C%20GitLab%20%7C%20Forgejo%20%7C%20Bitbucket%20%7C%20SourceHut-111111.svg)
+![Destinations](https://img.shields.io/badge/destinations-GitHub%20%7C%20GitLab%20%7C%20Forgejo%20%7C%20Bitbucket%20%7C%20SourceHut-111111.svg)
 
 AGMH means **ANTI GITHUB & MICROSOFT HYSTERIA**.
 
 AGMH is a local backup and repository mirroring CLI built to help researchers,
-maintainers, and software teams pull their work out of GitHub quickly and push
-it to other forges without losing years of history, branches, tags, or research.
+maintainers, and software teams pull their work out of a forge quickly and push
+it to another forge without losing years of history, branches, tags, or research.
 
-It discovers repositories from GitHub profiles or organizations, clones them
-locally as mirrors, adds a small provenance marker file, creates matching
-repositories on destination platforms, and pushes the backup to GitHub, GitLab,
-Codeberg/Forgejo, SourceHut, Bitbucket, or compatible Git remotes.
+It discovers repositories from supported source profiles, organizations, groups,
+namespaces, or workspaces; clones them locally as mirrors; adds a small
+provenance marker file; creates matching repositories on destination platforms;
+and pushes the backup to GitHub, GitLab, Codeberg/Forgejo, SourceHut,
+Bitbucket, or compatible Git remotes.
 
 The primary CLI command is:
 
@@ -133,9 +132,9 @@ Haltman.IO links:
 
 AGMH can:
 
-- Read GitHub profile or organization URLs from a text file.
-- Discover accessible public and private GitHub repositories.
-- Use one or more GitHub tokens to increase API limits and access private repos.
+- Read source profile, organization, group, namespace, or workspace URLs from a text file.
+- Discover accessible public and private repositories from GitHub, GitLab, Forgejo/Gitea, Bitbucket, and SourceHut.
+- Use one or more source tokens to increase API limits and access private repos.
 - Rotate tokens when rate limits or authorization failures happen.
 - Clone each repository locally using `git clone --mirror`.
 - Run in local-only mode to download/update mirrors without pushing anywhere.
@@ -155,7 +154,16 @@ AGMH can:
 
 ## Supported Platforms
 
-AGMH currently treats GitHub as the source platform.
+Source support:
+
+| Platform | Discovery scope | Private repos | Notes |
+| --- | --- | --- | --- |
+| GitHub | User or organization | Yes, with token | Uses GitHub REST repositories API. GitHub Enterprise can use `api_base`. |
+| GitLab | User, group, or subgroup | Yes, with token | Group discovery includes subgroups. `internal` repositories are treated as non-public when mirrored elsewhere. |
+| Codeberg | User or organization | Yes, with token | Uses the Forgejo adapter. |
+| Forgejo/Gitea | User or organization | Yes, with token | Works with compatible `/api/v1` instances. |
+| Bitbucket | Workspace | Yes, with token | Uses Bitbucket Cloud workspaces and repository pagination. |
+| SourceHut | User | Yes, with token | Uses the git.sr.ht GraphQL API. `unlisted` visibility is preserved when the destination supports it. |
 
 Destination support:
 
@@ -172,7 +180,7 @@ Destination support:
 
 - Python 3.11 or newer.
 - Git available in `PATH`.
-- Network access to GitHub and destination forges.
+- Network access to source and destination forges.
 - Destination accounts and tokens with enough permission to create repositories and push Git refs.
 - Optional: `git-lfs` if you enable `lfs = true`.
 - Optional: `ssh-agent` and SSH keys for SourceHut or SSH-based destinations.
@@ -291,7 +299,7 @@ Default full workflow:
 agmh run --config agmh.config.toml --verbose
 ```
 
-This discovers GitHub repositories, clones or updates local mirrors, adds the
+This discovers source repositories, clones or updates local mirrors, adds the
 marker commit, creates destination repositories, and pushes mirrors.
 
 Local mirror only:
@@ -306,7 +314,7 @@ Equivalent:
 agmh run --config agmh.config.toml --mode local --verbose
 ```
 
-This discovers GitHub repositories and only clones or updates local bare mirrors
+This discovers source repositories and only clones or updates local bare mirrors
 under `backup.local_dir`. It does not create marker commits and does not contact
 destination forges, even if destinations are present in the config.
 
@@ -322,7 +330,7 @@ Equivalent:
 agmh run --config agmh.config.toml --mode remote --verbose
 ```
 
-This does not discover or clone from GitHub. It reads mirrors recorded in
+This does not discover or clone from source forges. It reads mirrors recorded in
 `.agmh/state.json`, falls back to scanning `backup.local_dir`, adds the marker
 commit if needed, creates destination repositories, and pushes the local mirrors.
 When AGMH has to scan local mirrors without state metadata, repository privacy is
@@ -351,12 +359,16 @@ mode = "full"   # full, local, or remote
 
 ## Input Files
 
-AGMH reads source profiles from a plain text file. One GitHub profile or
-organization URL per line:
+AGMH reads source profiles from a plain text file. Use one profile,
+organization, group, namespace, or workspace URL per line:
 
 ```txt
 https://github.com/extencil/
 https://github.com/haltman-io/
+https://gitlab.com/haltman-io/
+https://codeberg.org/haltman/
+https://bitbucket.org/example-workspace/
+https://git.sr.ht/~extencil/
 ```
 
 Blank lines and lines beginning with `#` are ignored.
@@ -366,6 +378,9 @@ You can also pass source profiles directly:
 ```bash
 agmh run --source https://github.com/extencil/ --source https://github.com/haltman-io/
 ```
+
+For private non-GitHub sources, prefer inline `[[sources]]` entries so each
+source can declare its own `tokens` and `api_base`.
 
 Destinations can be configured in TOML or in a plain text file:
 
@@ -384,13 +399,19 @@ dry_run = false
 verbose = 0
 tui = true
 insecure_tls = false
+sources_file = "targets.txt"
 
 [github]
-profiles_file = "targets.txt"
 tokens = [
   { env = "GITHUB_TOKEN", name = "github-primary" },
   # { env = "GITHUB_TOKEN_2", name = "github-secondary" },
 ]
+
+# Inline sources are useful when a non-GitHub source needs a token or api_base.
+[[sources]]
+url = "https://gitlab.com/haltman-io"
+platform = "gitlab"
+tokens = [{ env = "GITLAB_SOURCE_TOKEN", name = "gitlab-source" }]
 
 [backup]
 local_dir = "backups"
@@ -464,22 +485,33 @@ Top-level options:
 | `insecure_tls` | Disable TLS certificate verification for API calls and Git HTTPS operations. |
 | `resume` | Reuse `.agmh/state.json` and skip completed steps. |
 | `force` | Redo steps even if state says they are complete. |
+| `sources_file` | Text file containing source profile/org/group/workspace URLs. |
 
-GitHub options:
+GitHub source shortcut options:
 
 | Key | Meaning |
 | --- | --- |
 | `api_base` | GitHub API base URL. Default: `https://api.github.com`. |
-| `profiles_file` | Text file containing source GitHub profile/org URLs. |
-| `profiles` | Inline list of source GitHub profile/org URLs. |
-| `tokens` | List of token entries. Use `env` instead of hardcoding secrets. |
+| `profiles_file` | Text file containing GitHub source profile/org URLs. Prefer top-level `sources_file` for mixed providers. |
+| `profiles` | Inline list of GitHub source profile/org URLs. Prefer `[[sources]]` for mixed providers. |
+| `tokens` | GitHub source token entries. These are also attached to GitHub URLs read from `sources_file`. |
+
+Source options:
+
+| Key | Meaning |
+| --- | --- |
+| `url` | Source profile, org, group, namespace, or workspace URL. |
+| `platform` | `github`, `gitlab`, `forgejo`, `sourcehut`, or `bitbucket`. Usually inferred from `url`. |
+| `api_base` | Optional API override for self-hosted or enterprise instances. |
+| `owner` | Optional owner/namespace/workspace override. |
+| `tokens` | Source API and HTTPS clone tokens. Use `env` instead of hardcoding secrets. |
 
 Backup options:
 
 | Key | Meaning |
 | --- | --- |
 | `local_dir` | Local mirror storage directory. |
-| `clone_protocol` | `https` or `ssh` for GitHub clone URLs. |
+| `clone_protocol` | `https` or `ssh` for source clone URLs. |
 | `include_archived` | Include archived repositories. |
 | `include_forks` | Include forked repositories. |
 | `include_private_for_authenticated_user` | When the token belongs to the target user, include private repositories. |
@@ -568,9 +600,15 @@ You can pass extra tokens from the CLI:
 agmh run \
   --source https://github.com/haltman-io/ \
   --github-token env:GITHUB_TOKEN \
+  --source-token gitlab:env:GITLAB_SOURCE_TOKEN \
   --destination https://gitlab.com/haltman-io \
   --destination-token gitlab:env:GITLAB_TOKEN
 ```
+
+Use `--github-token` as a shortcut for GitHub sources. Use `--source-token platform:...`
+for other source providers, for example `gitlab:env:GITLAB_TOKEN`,
+`forgejo:env:CODEBERG_TOKEN`, `bitbucket:env:BITBUCKET_TOKEN`,
+`bitbucket:you@example.com:env:BITBUCKET_TOKEN`, or `sourcehut:env:SOURCEHUT_TOKEN`.
 
 Multiple tokens are allowed. AGMH rotates tokens when a token is rejected, rate
 limited, or temporarily unusable.
@@ -897,6 +935,34 @@ agmh run \
   --verbose
 ```
 
+Back up one GitLab group to GitHub:
+
+```bash
+export GITLAB_SOURCE_TOKEN="..."
+export GITHUB_DEST_TOKEN="..."
+
+agmh run \
+  --source https://gitlab.com/haltman-io/ \
+  --source-token gitlab:env:GITLAB_SOURCE_TOKEN \
+  --destination https://github.com/haltman-io-mirror \
+  --destination-token github:env:GITHUB_DEST_TOKEN \
+  --verbose
+```
+
+Back up one Codeberg account to GitLab:
+
+```bash
+export CODEBERG_SOURCE_TOKEN="..."
+export GITLAB_TOKEN="..."
+
+agmh run \
+  --source https://codeberg.org/haltman/ \
+  --source-token forgejo:env:CODEBERG_SOURCE_TOKEN \
+  --destination https://gitlab.com/haltman-codeberg-mirror \
+  --destination-token gitlab:env:GITLAB_TOKEN \
+  --verbose
+```
+
 Use Codeberg:
 
 ```bash
@@ -965,9 +1031,9 @@ Or run with:
 PYTHONPATH=src python3 -m anti_gh_ms_hysteria run --help
 ```
 
-### It hangs on `Discovering GitHub repositories`
+### It hangs on source discovery
 
-The first GitHub API request is waiting on network, DNS, proxy, or TLS.
+The first source API request is waiting on network, DNS, proxy, or TLS.
 
 Run:
 
@@ -975,7 +1041,7 @@ Run:
 agmh run --config agmh.config.toml --dry-run -v --request-timeout 5 --max-retries 0
 ```
 
-Check GitHub directly:
+Check the source API directly. For GitHub:
 
 ```bash
 curl -I --max-time 10 https://api.github.com/users/extencil
@@ -1113,7 +1179,7 @@ src/anti_gh_ms_hysteria/
   git_ops.py            clone, marker commit, push operations
   http.py               API client, retries, proxy, TLS handling
   state.py              resumable state file
-  sources/github.py     GitHub discovery adapter
+  sources/              GitHub, GitLab, Forgejo, Bitbucket, SourceHut discovery adapters
   destinations/         GitHub, GitLab, Forgejo, Bitbucket, SourceHut adapters
 tests/
   test_config_and_utils.py
@@ -1153,8 +1219,11 @@ PYTHONPATH=src python -m anti_gh_ms_hysteria run --help
 - GitHub REST API rate limits: https://docs.github.com/rest/rate-limit/rate-limit
 - GitLab personal access tokens: https://docs.gitlab.com/user/profile/personal_access_tokens/
 - GitLab Projects API: https://docs.gitlab.com/api/projects/
+- GitLab Groups API: https://docs.gitlab.com/api/groups/
 - Codeberg access tokens: https://docs.codeberg.org/advanced/access-token/
 - Forgejo API usage: https://forgejo.org/docs/latest/user/api-usage/
+- Bitbucket repositories API: https://developer.atlassian.com/cloud/bitbucket/rest/api-group-repositories/
+- SourceHut git.sr.ht GraphQL API docs: https://docs.sourcehut.org/git.sr.ht/
 - SourceHut GraphQL API docs: https://docs.sourcehut.org/
 - SourceHut: https://sourcehut.org/
 - The Hacker's Choice: https://www.thc.org/

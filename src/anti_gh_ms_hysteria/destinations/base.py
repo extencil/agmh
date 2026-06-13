@@ -71,6 +71,9 @@ class DestinationAdapter(ABC):
             return "private"
         if self.dest.visibility == "unlisted":
             return "unlisted"
+        source_visibility = (repo.visibility or "").lower()
+        if source_visibility in {"public", "private", "unlisted"}:
+            return source_visibility
         return "private" if repo.private else "public"
 
     def _authenticate_urls(self, url: str, repo: RepoInfo) -> list[str]:

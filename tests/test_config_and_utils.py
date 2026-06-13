@@ -13,13 +13,20 @@ from anti_gh_ms_hysteria.config import (
     load_config,
     parse_cli_token,
     parse_destination_token,
+    parse_source_token,
+    source_from_url,
 )
 from anti_gh_ms_hysteria.cli import build_config_from_args, build_parser
 from anti_gh_ms_hysteria.destinations import build_destination
 from anti_gh_ms_hysteria.destinations.github import GitHubDestination
 from anti_gh_ms_hysteria.destinations.gitlab import GitLabDestination
 from anti_gh_ms_hysteria.destinations.gitlab import gitlab_safe_project_path
-from anti_gh_ms_hysteria.git_ops import GitMirrorManager, build_git_ssh_command, git_failure_hint
+from anti_gh_ms_hysteria.git_ops import (
+    GitMirrorManager,
+    build_git_ssh_command,
+    git_failure_hint,
+    source_auth_username,
+)
 from anti_gh_ms_hysteria.http import JsonResponse
 from anti_gh_ms_hysteria.models import (
     AppConfig,
@@ -28,9 +35,16 @@ from anti_gh_ms_hysteria.models import (
     GitConfig,
     GitHubConfig,
     RepoInfo,
+    SourceConfig,
     TokenCredential,
 )
 from anti_gh_ms_hysteria.runner import MirrorRunner
+from anti_gh_ms_hysteria.sources import build_source
+from anti_gh_ms_hysteria.sources.bitbucket import BitbucketSource
+from anti_gh_ms_hysteria.sources.forgejo import ForgejoSource
+from anti_gh_ms_hysteria.sources.github import GitHubSource
+from anti_gh_ms_hysteria.sources.gitlab import GitLabSource
+from anti_gh_ms_hysteria.sources.sourcehut import SourceHutSource
 from anti_gh_ms_hysteria.state import StateStore
 from anti_gh_ms_hysteria.utils import infer_platform, parse_owner_from_profile_url
 
@@ -143,6 +157,16 @@ class UrlParsingTests(unittest.TestCase):
         self.assertEqual(dest.platform, "github")
         self.assertEqual(dest.owner, "destination-owner")
 
+    def test_source_url_preserves_gitlab_nested_namespace(self) -> None:
+        source = source_from_url("https://gitlab.com/group/subgroup")
+        self.assertEqual(source.platform, "gitlab")
+        self.assertEqual(source.owner, "group/subgroup")
+
+    def test_source_url_supports_destination_platforms(self) -> None:
+        self.assertEqual(source_from_url("https://codeberg.org/extencil").platform, "forgejo")
+        self.assertEqual(source_from_url("https://bitbucket.org/extencil").platform, "bitbucket")
+        self.assertEqual(source_from_url("https://git.sr.ht/~extencil").owner, "extencil")
+
 
 class TokenParsingTests(unittest.TestCase):
     def test_env_token(self) -> None:
@@ -156,6 +180,19 @@ class TokenParsingTests(unittest.TestCase):
         self.assertEqual(platform, "bitbucket")
         self.assertEqual(token.username, "you@example.com")
         self.assertEqual(token.secret, "secret")
+
+    def test_source_token_uses_same_platform_prefix_format(self) -> None:
+        platform, token = parse_source_token("gitlab:oauth2:secret")
+        self.assertEqual(platform, "gitlab")
+        self.assertEqual(token.username, "oauth2")
+        self.assertEqual(token.secret, "secret")
+
+    def test_username_token_can_resolve_env_secret(self) -> None:
+        os.environ["AGMH_BITBUCKET_APP_PASSWORD"] = "bb-secret"
+        platform, token = parse_source_token("bitbucket:you@example.com:env:AGMH_BITBUCKET_APP_PASSWORD")
+        self.assertEqual(platform, "bitbucket")
+        self.assertEqual(token.username, "you@example.com")
+        self.assertEqual(token.secret, "bb-secret")
 
 
 class ConfigTests(unittest.TestCase):
@@ -188,7 +225,45 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(cfg.workspace.name, ".state")
         self.assertTrue(cfg.insecure_tls)
         self.assertEqual(cfg.github.tokens[0].secret, "gh-secret")
+        self.assertEqual(cfg.sources[0].platform, "github")
+        self.assertEqual(cfg.sources[0].tokens[0].secret, "gh-secret")
         self.assertEqual(cfg.destinations[0].platform, "forgejo")
+
+    def test_config_from_dict_accepts_generic_sources(self) -> None:
+        os.environ["AGMH_GL"] = "gl-secret"
+        cfg = config_from_dict(
+            {
+                "sources": [
+                    {
+                        "url": "https://gitlab.com/group/subgroup",
+                        "tokens": [{"env": "AGMH_GL"}],
+                    }
+                ]
+            },
+            Path.cwd(),
+        )
+        self.assertEqual(cfg.sources[0].platform, "gitlab")
+        self.assertEqual(cfg.sources[0].owner, "group/subgroup")
+        self.assertEqual(cfg.sources[0].tokens[0].secret, "gl-secret")
+
+    def test_build_config_from_args_loads_generic_sources_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "targets.txt").write_text(
+                "\n".join(
+                    [
+                        "https://github.com/extencil",
+                        "https://gitlab.com/group/subgroup",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            config_path = root / "agmh.config.toml"
+            config_path.write_text('sources_file = "targets.txt"\n', encoding="utf-8")
+            args = build_parser().parse_args(["run", "--config", str(config_path)])
+            cfg = build_config_from_args(args, include_destinations=True)
+        self.assertEqual([source.platform for source in cfg.sources], ["github", "gitlab"])
+        self.assertEqual(cfg.sources[1].owner, "group/subgroup")
 
     def test_github_tokens_accept_named_table(self) -> None:
         os.environ["AGMH_GH_1"] = "gh-secret-1"
@@ -272,6 +347,23 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(cfg.mode, "remote")
         self.assertEqual(cfg.github.tokens, [])
 
+    def test_remote_mode_does_not_require_source_token_envs(self) -> None:
+        os.environ.pop("AGMH_MISSING_SOURCE_TOKEN", None)
+        cfg = config_from_dict(
+            {
+                "mode": "remote",
+                "sources": [
+                    {
+                        "url": "https://gitlab.com/extencil",
+                        "tokens": [{"env": "AGMH_MISSING_SOURCE_TOKEN"}],
+                    }
+                ],
+            },
+            Path.cwd(),
+        )
+        self.assertEqual(cfg.mode, "remote")
+        self.assertEqual(cfg.sources, [])
+
 
 class StateTests(unittest.TestCase):
     def test_state_persists_steps(self) -> None:
@@ -330,6 +422,17 @@ class GitMirrorTests(unittest.TestCase):
         self.assertEqual(runner.commands[2][0][3:], ["lfs", "fetch", "--all"])
         self.assertEqual(runner.commands[3][0][3:6], ["remote", "set-url", "origin"])
         self.assertEqual(runner.commands[3][0][-1], repo.clone_url)
+
+    def test_source_clone_auth_username_depends_on_platform(self) -> None:
+        self.assertEqual(source_auth_username(repo_info(), TokenCredential("secret")), "x-access-token")
+        gitlab_repo = RepoInfo(**{**repo_info().__dict__, "source_platform": "gitlab"})
+        self.assertEqual(source_auth_username(gitlab_repo, TokenCredential("secret")), "oauth2")
+        bitbucket_repo = RepoInfo(**{**repo_info().__dict__, "source_platform": "bitbucket"})
+        self.assertEqual(source_auth_username(bitbucket_repo, TokenCredential("secret")), "x-token-auth")
+        self.assertEqual(
+            source_auth_username(gitlab_repo, TokenCredential("secret", username="user")),
+            "user",
+        )
 
 
 class DestinationMappingTests(unittest.TestCase):
@@ -435,15 +538,150 @@ class DestinationMappingTests(unittest.TestCase):
         destination.dest.visibility = "private"
         self.assertEqual(destination.visibility_for(public_repo), "private")
 
+    def test_mirror_visibility_prefers_source_visibility(self) -> None:
+        repo = RepoInfo(**{**repo_info().__dict__, "private": False, "visibility": "unlisted"})
+        destination = GitLabDestination(
+            DestinationConfig(url="gitlab.com/group", platform="gitlab", owner="group"),
+            AppConfig(),
+            DummyUI(),
+        )
+        self.assertEqual(destination.visibility_for(repo), "unlisted")
+
+
+class SourceMappingTests(unittest.TestCase):
+    def test_builds_source_adapters(self) -> None:
+        cases = [
+            (
+                SourceConfig(url="https://github.com/extencil", platform="github", owner="extencil"),
+                GitHubSource,
+            ),
+            (
+                SourceConfig(url="https://gitlab.com/extencil", platform="gitlab", owner="extencil"),
+                GitLabSource,
+            ),
+            (
+                SourceConfig(url="https://codeberg.org/extencil", platform="forgejo", owner="extencil"),
+                ForgejoSource,
+            ),
+            (
+                SourceConfig(url="https://bitbucket.org/extencil", platform="bitbucket", owner="extencil"),
+                BitbucketSource,
+            ),
+            (
+                SourceConfig(url="https://git.sr.ht/~extencil", platform="sourcehut", owner="extencil"),
+                SourceHutSource,
+            ),
+        ]
+        for config, expected_type in cases:
+            self.assertIsInstance(build_source(config, AppConfig(), DummyUI()), expected_type)
+
+    def test_gitlab_repo_response_maps_to_repo_info(self) -> None:
+        source = GitLabSource(
+            SourceConfig(url="https://gitlab.com/group", platform="gitlab", owner="group"),
+            AppConfig(),
+            DummyUI(),
+        )
+        repo = source._repo_from_api(
+            {
+                "path": "repo",
+                "path_with_namespace": "group/subgroup/repo",
+                "web_url": "https://gitlab.com/group/subgroup/repo",
+                "http_url_to_repo": "https://gitlab.com/group/subgroup/repo.git",
+                "ssh_url_to_repo": "git@gitlab.com:group/subgroup/repo.git",
+                "default_branch": "main",
+                "visibility": "internal",
+                "archived": True,
+                "forked_from_project": {"id": 1},
+            }
+        )
+        self.assertEqual(repo.source_platform, "gitlab")
+        self.assertEqual(repo.owner, "group/subgroup")
+        self.assertTrue(repo.private)
+        self.assertTrue(repo.archived)
+        self.assertTrue(repo.fork)
+
+    def test_forgejo_repo_response_maps_to_repo_info(self) -> None:
+        source = ForgejoSource(
+            SourceConfig(url="https://codeberg.org/extencil", platform="forgejo", owner="extencil"),
+            AppConfig(),
+            DummyUI(),
+        )
+        repo = source._repo_from_api(
+            {
+                "name": "repo",
+                "full_name": "extencil/repo",
+                "owner": {"login": "extencil"},
+                "html_url": "https://codeberg.org/extencil/repo",
+                "clone_url": "https://codeberg.org/extencil/repo.git",
+                "ssh_url": "git@codeberg.org:extencil/repo.git",
+                "default_branch": "main",
+                "private": True,
+                "fork": False,
+            }
+        )
+        self.assertEqual(repo.source_platform, "forgejo")
+        self.assertEqual(repo.visibility, "private")
+        self.assertTrue(repo.private)
+
+    def test_bitbucket_repo_response_maps_to_repo_info(self) -> None:
+        source = BitbucketSource(
+            SourceConfig(url="https://bitbucket.org/workspace", platform="bitbucket", owner="workspace"),
+            AppConfig(),
+            DummyUI(),
+        )
+        repo = source._repo_from_api(
+            {
+                "full_name": "workspace/repo",
+                "name": "Repo",
+                "links": {
+                    "html": {"href": "https://bitbucket.org/workspace/repo"},
+                    "clone": [
+                        {"name": "ssh", "href": "git@bitbucket.org:workspace/repo.git"},
+                        {"name": "https", "href": "https://bitbucket.org/workspace/repo.git"},
+                    ],
+                },
+                "mainbranch": {"name": "main"},
+                "is_private": False,
+            }
+        )
+        self.assertEqual(repo.clone_url, "https://bitbucket.org/workspace/repo.git")
+        self.assertEqual(repo.ssh_url, "git@bitbucket.org:workspace/repo.git")
+        self.assertFalse(repo.private)
+
+    def test_sourcehut_repo_response_maps_to_repo_info(self) -> None:
+        source = SourceHutSource(
+            SourceConfig(url="https://git.sr.ht/~extencil", platform="sourcehut", owner="extencil"),
+            AppConfig(),
+            DummyUI(),
+        )
+        repo = source._repo_from_api(
+            {
+                "name": "repo",
+                "repoPath": "~extencil/repo",
+                "visibility": "UNLISTED",
+                "HEAD": {"name": "refs/heads/trunk"},
+            }
+        )
+        self.assertEqual(repo.full_name, "extencil/repo")
+        self.assertEqual(repo.web_url, "https://git.sr.ht/~extencil/repo")
+        self.assertEqual(repo.default_branch, "trunk")
+        self.assertEqual(repo.visibility, "unlisted")
+
 
 class RunnerTests(unittest.TestCase):
     def test_run_fails_when_source_discovery_fails(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            cfg = AppConfig(
-                workspace=Path(tmp) / ".agmh",
-                github=GitHubConfig(profiles=["https://gitlab.com/not-github"]),
-            )
-            result = MirrorRunner(cfg, DummyUI()).run()
+            cfg = AppConfig(workspace=Path(tmp) / ".agmh")
+            runner = MirrorRunner(cfg, DummyUI())
+
+            class FailingDiscovery:
+                discovery_errors = [("https://example.invalid/source", "boom")]
+
+                def discover(self):
+                    return []
+
+            runner.source = FailingDiscovery()
+            result = runner.run()
         self.assertEqual(result, 1)
 
     def test_local_mode_clones_without_marker_or_destinations(self) -> None:

@@ -35,6 +35,7 @@ class RepoInfo:
     description: str | None = None
     archived: bool = False
     fork: bool = False
+    visibility: str | None = None
 
     @property
     def key(self) -> str:
@@ -84,6 +85,15 @@ class GitHubConfig:
 
 
 @dataclass
+class SourceConfig:
+    url: str
+    platform: str | None = None
+    api_base: str | None = None
+    owner: str | None = None
+    tokens: list[TokenCredential] = field(default_factory=list)
+
+
+@dataclass
 class DestinationConfig:
     url: str
     platform: str | None = None
@@ -108,6 +118,8 @@ class AppConfig:
     proxy: str | None = None
     insecure_tls: bool = False
     destinations_file: Path | None = None
+    sources_file: Path | None = None
+    sources: list[SourceConfig] = field(default_factory=list)
     destinations: list[DestinationConfig] = field(default_factory=list)
     github: GitHubConfig = field(default_factory=GitHubConfig)
     backup: BackupConfig = field(default_factory=BackupConfig)

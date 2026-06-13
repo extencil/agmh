@@ -4,14 +4,25 @@ dry_run = false
 verbose = 0
 tui = true
 insecure_tls = false
+sources_file = "targets.txt"
 
 [github]
-# Copy targets.example.txt to targets.txt, then edit targets.txt for your run.
-profiles_file = "targets.txt"
+# Optional defaults for GitHub source URLs from sources_file or [github].profiles.
 tokens = [
   { env = "GITHUB_TOKEN", name = "github-primary" },
   # { env = "GITHUB_TOKEN_2", name = "github-secondary" },
 ]
+
+# Use inline sources when a non-GitHub source needs its own token or API base.
+# [[sources]]
+# url = "https://gitlab.com/extencil"
+# platform = "gitlab"
+# tokens = [{ env = "GITLAB_SOURCE_TOKEN", name = "gitlab-source" }]
+#
+# [[sources]]
+# url = "https://codeberg.org/extencil"
+# platform = "forgejo"
+# tokens = [{ env = "CODEBERG_SOURCE_TOKEN", username = "extencil" }]
 
 [backup]
 local_dir = "backups"

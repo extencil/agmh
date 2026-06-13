@@ -14,6 +14,8 @@ from .config import (
     load_config,
     parse_cli_token,
     parse_destination_token,
+    parse_source_token,
+    source_from_url,
 )
 from .runner import MirrorRunner
 from .ui import UI, setup_logging
@@ -24,10 +26,15 @@ mode = "full"
 dry_run = false
 verbose = 0
 tui = true
+sources_file = "targets.txt"
 
 [github]
-profiles_file = "targets.txt"
 tokens = [{ env = "GITHUB_TOKEN", name = "github-primary" }]
+
+# [[sources]]
+# url = "https://gitlab.com/example"
+# platform = "gitlab"
+# tokens = [{ env = "GITLAB_SOURCE_TOKEN", name = "gitlab-source" }]
 
 [backup]
 local_dir = "backups"
@@ -71,7 +78,7 @@ def main(argv: list[str] | None = None) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="agmh",
-        description="Local GitHub backup and repository mirroring CLI.",
+        description="Local repository backup and mirroring CLI.",
     )
     sub = parser.add_subparsers(dest="command")
 
@@ -87,7 +94,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_runtime_args(remote, mode=False, destination_visibility=True)
     remote.set_defaults(handler=run_command, workflow_mode="remote")
 
-    discover = sub.add_parser("discover", help="list accessible GitHub repositories")
+    discover = sub.add_parser("discover", help="list accessible source repositories")
     add_runtime_args(discover, destinations=False, mode=False)
     discover.add_argument("--output", type=Path, help="write JSON discovery output to this file")
     discover.set_defaults(handler=discover_command)
@@ -117,9 +124,15 @@ def add_runtime_args(
             choices=["full", "local", "remote"],
             help="workflow mode: full clones and pushes, local only clones, remote only pushes local mirrors",
         )
-    parser.add_argument("--sources", type=Path, help="text file with one GitHub profile URL per line")
-    parser.add_argument("--source", action="append", default=[], help="GitHub profile URL; repeatable")
-    parser.add_argument("--github-token", action="append", default=[], help="GitHub token value or env:NAME; repeatable")
+    parser.add_argument("--sources", type=Path, help="text file with one source profile URL per line")
+    parser.add_argument("--source", action="append", default=[], help="source profile URL; repeatable")
+    parser.add_argument("--github-token", action="append", default=[], help="GitHub source token value or env:NAME; repeatable")
+    parser.add_argument(
+        "--source-token",
+        action="append",
+        default=[],
+        help="source token as platform:token, platform:env:NAME, platform:username:token, or platform:username:env:NAME",
+    )
     parser.add_argument("--workspace", type=Path, help="state/log workspace directory")
     parser.add_argument("--local-dir", type=Path, help="local bare mirror directory")
     parser.add_argument("--clone-protocol", choices=["https", "ssh"], help="source clone protocol")
@@ -146,8 +159,8 @@ def add_runtime_args(
     parser.add_argument("--force", action="store_true", help="redo steps even if state says they are done")
     parser.add_argument("--lfs", action="store_true", help="run git lfs fetch --all after mirror updates")
     parser.add_argument("-v", "--verbose", action="count", default=0, help="increase log verbosity")
-    parser.add_argument("--exclude-archived", action="store_true", help="skip archived GitHub repositories")
-    parser.add_argument("--exclude-forks", action="store_true", help="skip forked GitHub repositories")
+    parser.add_argument("--exclude-archived", action="store_true", help="skip archived source repositories")
+    parser.add_argument("--exclude-forks", action="store_true", help="skip forked source repositories")
     if destinations:
         parser.add_argument("--destinations", type=Path, help="text file with one destination profile URL per line")
         parser.add_argument("--destination", action="append", default=[], help="destination profile URL; repeatable")
@@ -166,14 +179,14 @@ def add_runtime_args(
             "--destination-token",
             action="append",
             default=[],
-            help="destination token as platform:token, platform:env:NAME, or platform:username:token",
+            help="destination token as platform:token, platform:env:NAME, platform:username:token, or platform:username:env:NAME",
         )
 
 
 def run_command(args: argparse.Namespace) -> int:
     cfg = build_config_from_args(args, include_destinations=True)
-    if cfg.mode != "remote" and not cfg.github.profiles:
-        print("No GitHub source profiles were provided.", file=sys.stderr)
+    if cfg.mode != "remote" and not cfg.sources:
+        print("No source profiles were provided.", file=sys.stderr)
         return 2
     if cfg.mode == "remote" and not cfg.destinations:
         print("No remote destinations were provided.", file=sys.stderr)
@@ -186,8 +199,8 @@ def run_command(args: argparse.Namespace) -> int:
 
 def discover_command(args: argparse.Namespace) -> int:
     cfg = build_config_from_args(args, include_destinations=False)
-    if not cfg.github.profiles:
-        print("No GitHub source profiles were provided.", file=sys.stderr)
+    if not cfg.sources:
+        print("No source profiles were provided.", file=sys.stderr)
         return 2
     logger, log_path = setup_logging(cfg.workspace, cfg.verbose)
     ui = UI(logger, use_rich=cfg.tui, verbose=cfg.verbose)
@@ -277,9 +290,30 @@ def build_config_from_args(args: argparse.Namespace, include_destinations: bool)
         cfg.backup.include_forks = False
 
     if cfg.mode != "remote":
+        github_tokens = [parse_cli_token(token) for token in args.github_token]
+        cfg.github.tokens.extend(github_tokens)
+        for source in cfg.sources:
+            if (source.platform or "").lower() == "github":
+                source.tokens.extend(github_tokens)
         apply_profile_file(cfg, args.sources)
         cfg.github.profiles.extend(args.source)
-        cfg.github.tokens.extend(parse_cli_token(token) for token in args.github_token)
+        cfg.sources.extend(
+            source_from_url(
+                url,
+                tokens=cfg.github.tokens if _looks_like_github_source(url) else None,
+                api_base=cfg.github.api_base,
+            )
+            for url in args.source
+        )
+        source_tokens = [parse_source_token(value) for value in args.source_token]
+        for platform, token in source_tokens:
+            matched = False
+            for source in cfg.sources:
+                if (source.platform or "").lower() == platform:
+                    source.tokens.append(token)
+                    matched = True
+            if not matched:
+                print(f"WARNING: no source matched token platform {platform}", file=sys.stderr)
 
     if include_destinations and cfg.mode != "local":
         apply_destinations_file(cfg, args.destinations)
@@ -308,3 +342,10 @@ def _mode_override(args: argparse.Namespace) -> str | None:
     if command_mode and explicit_mode and command_mode != explicit_mode:
         raise ConfigError(f"{args.command} uses mode {command_mode!r}; do not also pass --mode {explicit_mode!r}")
     return explicit_mode or command_mode
+
+
+def _looks_like_github_source(url: str) -> bool:
+    try:
+        return (source_from_url(url).platform or "").lower() == "github"
+    except ValueError:
+        return False

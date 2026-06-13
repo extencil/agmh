@@ -3,19 +3,18 @@ from __future__ import annotations
 from urllib.parse import urlencode
 
 from ..http import ApiClient, HttpError
-from ..models import AppConfig, RepoInfo
-from ..tokens import TokenPool
+from ..models import AppConfig, RepoInfo, SourceConfig
 from ..ui import UI
-from ..utils import parse_owner_from_profile_url
+from .base import SourceAdapter
 
 
-class GitHubSource:
-    def __init__(self, cfg: AppConfig, ui: UI):
-        self.cfg = cfg
-        self.ui = ui
-        self.token_pool = TokenPool(cfg.github.tokens, cfg.retry, "GitHub")
+class GitHubSource(SourceAdapter):
+    platform = "github"
+
+    def __init__(self, source: SourceConfig, cfg: AppConfig, ui: UI):
+        super().__init__(source, cfg, ui)
         self.client = ApiClient(
-            cfg.github.api_base,
+            source.api_base or cfg.github.api_base,
             self.token_pool,
             cfg.retry,
             ui,
@@ -23,33 +22,11 @@ class GitHubSource:
             proxy=cfg.proxy,
             insecure_tls=cfg.insecure_tls,
         )
-        self.discovery_errors: list[tuple[str, str]] = []
 
     def discover(self) -> list[RepoInfo]:
-        self.discovery_errors = []
-        repos: dict[str, RepoInfo] = {}
-        for profile in self.cfg.github.profiles:
-            try:
-                owner = self._profile_owner(profile)
-                self.ui.info(f"Discovering GitHub repositories for {owner}")
-                for repo in self._discover_owner(owner):
-                    repos[repo.full_name.lower()] = repo
-            except Exception as exc:
-                self.discovery_errors.append((profile, str(exc)))
-                self.ui.error(f"Failed to discover {profile}: {exc}")
-        return sorted(repos.values(), key=lambda item: item.full_name.lower())
-
-    def current_token(self):
-        return self.token_pool.current()
-
-    def secrets(self) -> list[str]:
-        return self.token_pool.all_secrets()
-
-    def _profile_owner(self, profile: str) -> str:
-        host, owner, _ = parse_owner_from_profile_url(profile)
-        if host != "github.com":
-            raise ValueError(f"GitHub source profiles must use github.com: {profile}")
-        return owner
+        self.ui.info(f"Discovering GitHub repositories for {self.owner}")
+        repos = self._discover_owner(self.owner)
+        return sorted(repos, key=lambda item: item.full_name.lower())
 
     def _discover_owner(self, owner: str) -> list[RepoInfo]:
         account_type = self._account_type(owner)
@@ -60,7 +37,7 @@ class GitHubSource:
             repos.extend(self._list_paginated(f"/users/{owner}/repos", {"type": "all"}))
             if self.cfg.backup.include_private_for_authenticated_user and self.token_pool:
                 repos.extend(self._authenticated_owner_repos(owner))
-        return [repo for repo in repos if self._include(repo)]
+        return [repo for repo in repos if self.include(repo)]
 
     def _account_type(self, owner: str) -> str:
         response = self.client.request_json("GET", f"/users/{owner}")
@@ -111,8 +88,9 @@ class GitHubSource:
 
     def _repo_from_api(self, raw: dict) -> RepoInfo:
         owner = raw.get("owner") or {}
+        visibility = "private" if raw.get("private", False) else "public"
         return RepoInfo(
-            source_platform="github",
+            source_platform=self.platform,
             owner=str(owner.get("login") or raw.get("full_name", "").split("/")[0]),
             name=str(raw["name"]),
             full_name=str(raw["full_name"]),
@@ -124,11 +102,6 @@ class GitHubSource:
             description=raw.get("description"),
             archived=bool(raw.get("archived", False)),
             fork=bool(raw.get("fork", False)),
+            visibility=visibility,
         )
 
-    def _include(self, repo: RepoInfo) -> bool:
-        if repo.archived and not self.cfg.backup.include_archived:
-            return False
-        if repo.fork and not self.cfg.backup.include_forks:
-            return False
-        return True

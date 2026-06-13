@@ -9,7 +9,7 @@ from .destinations import build_destination
 from .destinations.base import DestinationAdapter
 from .git_ops import GitCommandError, GitMirrorManager, GitRunner
 from .models import AppConfig, RepoInfo
-from .sources.github import GitHubSource
+from .sources import SourceDiscovery
 from .state import StateStore
 from .ui import UI
 from .utils import scrub_secret, utc_now_iso
@@ -27,7 +27,7 @@ class MirrorRunner:
     def __init__(self, cfg: AppConfig, ui: UI):
         self.cfg = cfg
         self.ui = ui
-        self.source = GitHubSource(cfg, ui)
+        self.source = SourceDiscovery(cfg, ui)
         self.destinations = [build_destination(dest, cfg, ui) for dest in cfg.destinations]
         secrets = self.source.secrets()
         for dest in self.destinations:
@@ -45,7 +45,7 @@ class MirrorRunner:
             return self._run_remote_mirror()
 
         repos = self.discover()
-        self.ui.info(f"Discovered {len(repos)} GitHub repositories")
+        self.ui.info(f"Discovered {len(repos)} source repositories")
         discovery_failures = len(self.source.discovery_errors)
         failures = discovery_failures
         for repo in repos:
@@ -90,7 +90,9 @@ class MirrorRunner:
         payload = [
             {
                 "full_name": repo.full_name,
+                "source_platform": repo.source_platform,
                 "private": repo.private,
+                "visibility": repo.visibility,
                 "clone_url": repo.clone_url,
                 "ssh_url": repo.ssh_url,
                 "default_branch": repo.default_branch,
@@ -114,6 +116,7 @@ class MirrorRunner:
             full_name=repo.full_name,
             private=repo.private,
             default_branch=repo.default_branch,
+            visibility=repo.visibility,
         )
         mirror_path = self.git.mirror_path(repo)
         downloaded_at = utc_now_iso()
@@ -125,7 +128,7 @@ class MirrorRunner:
                 clone_step = self.state.repo(key).get("steps", {}).get("clone", {})
                 downloaded_at = clone_step.get("downloaded_at", downloaded_at)
             else:
-                token = self.source.current_token()
+                token = self.source.current_token(repo)
                 mirror_path, downloaded_at = self.git.clone_or_update(repo, token)
                 self._mark_step(key, "clone", "done", path=str(mirror_path), downloaded_at=downloaded_at)
         except Exception as exc:
@@ -150,6 +153,7 @@ class MirrorRunner:
             full_name=repo.full_name,
             private=repo.private,
             default_branch=repo.default_branch,
+            visibility=repo.visibility,
             privacy_known=mirror.privacy_known,
         )
         if not self.state.is_done(key, "clone"):
@@ -207,16 +211,18 @@ class MirrorRunner:
                 continue
             full_name = str(entry.get("full_name") or _full_name_from_key(key))
             owner, name = _split_full_name(full_name)
+            source_platform = key.split(":", 1)[0] if ":" in key else "github"
             repo = RepoInfo(
-                source_platform=key.split(":", 1)[0] if ":" in key else "github",
+                source_platform=source_platform,
                 owner=owner,
                 name=name,
                 full_name=full_name,
-                web_url=str(entry.get("source_url") or f"https://github.com/{full_name}"),
+                web_url=str(entry.get("source_url") or _default_web_url(source_platform, full_name)),
                 clone_url="",
                 ssh_url=None,
                 default_branch=entry.get("default_branch") or None,
                 private=bool(entry.get("private", False)),
+                visibility=entry.get("visibility") or None,
             )
             path = Path(str(clone_step.get("path") or self.git.mirror_path(repo)))
             downloaded_at = str(clone_step.get("downloaded_at") or entry.get("updated_at") or utc_now_iso())
@@ -242,11 +248,12 @@ class MirrorRunner:
                         owner=owner,
                         name=name,
                         full_name=full_name,
-                        web_url=f"https://github.com/{full_name}" if source == "github" else full_name,
+                        web_url=_default_web_url(source, full_name),
                         clone_url="",
                         ssh_url=None,
                         default_branch=_default_branch_from_head(mirror_path),
                         private=True,
+                        visibility="private",
                     )
                     mirrors.append(
                         LocalMirror(
@@ -406,10 +413,25 @@ def _full_name_from_key(key: str) -> str:
 
 
 def _split_full_name(full_name: str) -> tuple[str, str]:
-    owner, _, name = full_name.partition("/")
+    owner, _, name = full_name.rpartition("/")
     if not owner or not name:
         raise ValueError(f"Invalid repository full name in state: {full_name}")
     return owner, name
+
+
+def _default_web_url(source_platform: str, full_name: str) -> str:
+    if source_platform == "github":
+        return f"https://github.com/{full_name}"
+    if source_platform == "gitlab":
+        return f"https://gitlab.com/{full_name}"
+    if source_platform in {"forgejo", "codeberg", "gitea"}:
+        return f"https://codeberg.org/{full_name}"
+    if source_platform == "bitbucket":
+        return f"https://bitbucket.org/{full_name}"
+    if source_platform == "sourcehut":
+        owner, _, name = full_name.rpartition("/")
+        return f"https://git.sr.ht/~{owner}/{name}" if owner and name else full_name
+    return full_name
 
 
 def _looks_like_local_mirror(path: Path) -> bool:

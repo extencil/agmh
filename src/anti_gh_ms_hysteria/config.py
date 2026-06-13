@@ -12,6 +12,7 @@ from .models import (
     GitConfig,
     GitHubConfig,
     RetryConfig,
+    SourceConfig,
     TokenCredential,
 )
 from .utils import infer_platform, parse_owner_from_profile_url, read_lines_file, resolve_secret
@@ -63,6 +64,7 @@ def config_from_dict(
     cfg.resume = bool(data.get("resume", cfg.resume))
     cfg.force = bool(data.get("force", cfg.force))
     cfg.destinations_file = _optional_path(data.get("destinations_file"), base_dir)
+    cfg.sources_file = _optional_path(data.get("sources_file"), base_dir)
 
     github = data.get("github", {})
     cfg.github = GitHubConfig(
@@ -75,6 +77,19 @@ def config_from_dict(
     if cfg.mode != "remote" and not cfg.github.tokens:
         cfg.github.tokens = _default_env_tokens(
             [("GITHUB_TOKEN", "GITHUB_TOKEN"), ("GH_TOKEN", "GH_TOKEN")]
+        )
+
+    if cfg.mode != "remote":
+        cfg.sources = [
+            _source_from_dict(raw, parse_tokens=True) for raw in data.get("sources", [])
+        ]
+        cfg.sources.extend(
+            source_from_url(
+                profile,
+                tokens=cfg.github.tokens,
+                api_base=cfg.github.api_base,
+            )
+            for profile in cfg.github.profiles
         )
 
     backup = data.get("backup", {})
@@ -133,9 +148,16 @@ def config_from_dict(
 
 def apply_profile_file(cfg: AppConfig, path: Path | None) -> None:
     if path:
-        cfg.github.profiles_file = path
+        cfg.sources_file = path
+    if cfg.sources_file:
+        cfg.sources.extend(sources_from_file(cfg.sources_file, github_tokens=cfg.github.tokens))
     if cfg.github.profiles_file:
-        cfg.github.profiles.extend(read_lines_file(cfg.github.profiles_file))
+        profiles = read_lines_file(cfg.github.profiles_file)
+        cfg.github.profiles.extend(profiles)
+        cfg.sources.extend(
+            source_from_url(profile, tokens=cfg.github.tokens, api_base=cfg.github.api_base)
+            for profile in profiles
+        )
 
 
 def apply_destinations_file(cfg: AppConfig, path: Path | None) -> None:
@@ -149,12 +171,56 @@ def destinations_from_file(path: Path) -> list[DestinationConfig]:
     return [destination_from_url(line) for line in read_lines_file(path)]
 
 
+def sources_from_file(
+    path: Path,
+    github_tokens: list[TokenCredential] | None = None,
+) -> list[SourceConfig]:
+    return [
+        source_from_url(line, tokens=github_tokens if _looks_like_github(line) else None)
+        for line in read_lines_file(path)
+    ]
+
+
+def source_from_url(
+    url: str,
+    tokens: list[TokenCredential] | None = None,
+    api_base: str | None = None,
+) -> SourceConfig:
+    platform = infer_platform(url)
+    _, owner, parts = parse_owner_from_profile_url(url)
+    if platform == "gitlab" and parts:
+        owner = "/".join(parts)
+    return SourceConfig(
+        url=url,
+        platform=platform,
+        owner=owner,
+        api_base=api_base if platform == "github" else None,
+        tokens=list(tokens or []) if platform == "github" else [],
+    )
+
+
 def destination_from_url(url: str) -> DestinationConfig:
     platform = infer_platform(url)
     _, owner, parts = parse_owner_from_profile_url(url)
     if platform == "gitlab" and parts:
         owner = "/".join(parts)
     return DestinationConfig(url=url, platform=platform, owner=owner)
+
+
+def _source_from_dict(raw: dict[str, Any], parse_tokens: bool = True) -> SourceConfig:
+    url = str(raw["url"])
+    platform = str(raw.get("platform") or infer_platform(url))
+    _, owner, parts = parse_owner_from_profile_url(url)
+    if platform == "gitlab" and parts:
+        owner = "/".join(parts)
+    owner = str(raw.get("owner") or owner)
+    return SourceConfig(
+        url=url,
+        platform=platform,
+        api_base=raw.get("api_base"),
+        owner=owner,
+        tokens=_token_list(raw.get("tokens", []), f"source {url} tokens") if parse_tokens else [],
+    )
 
 
 def _destination_from_dict(raw: dict[str, Any]) -> DestinationConfig:
@@ -241,14 +307,24 @@ def parse_cli_token(value: str) -> TokenCredential:
         maybe_user, maybe_token = token_value.split(":", 1)
         if maybe_user and maybe_token:
             username = maybe_user
-            token_value = maybe_token
             name = maybe_user
+            if maybe_token.startswith("env:"):
+                token_value = resolve_secret(env=maybe_token.removeprefix("env:"))
+            else:
+                token_value = maybe_token
     return TokenCredential(token_value, name=name, username=username)
 
 
 def parse_destination_token(value: str) -> tuple[str, TokenCredential]:
     if ":" not in value:
-        raise ValueError("Destination tokens must use platform:token or platform:env:NAME")
+        raise ValueError("Destination tokens must use platform:token, platform:env:NAME, or platform:username:env:NAME")
+    platform, raw = value.split(":", 1)
+    return platform.lower(), parse_cli_token(raw)
+
+
+def parse_source_token(value: str) -> tuple[str, TokenCredential]:
+    if ":" not in value:
+        raise ValueError("Source tokens must use platform:token, platform:env:NAME, or platform:username:env:NAME")
     platform, raw = value.split(":", 1)
     return platform.lower(), parse_cli_token(raw)
 
@@ -298,6 +374,13 @@ def _workflow_mode(value: Any) -> str:
     if mode not in {"full", "local", "remote"}:
         raise ConfigError("mode must be one of: full, local, remote")
     return mode
+
+
+def _looks_like_github(url: str) -> bool:
+    try:
+        return infer_platform(url) == "github"
+    except ValueError:
+        return False
 
 
 def _toml_error_hint(text: str) -> str:
