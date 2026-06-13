@@ -11,10 +11,12 @@ from .models import (
     DestinationConfig,
     GitConfig,
     GitHubConfig,
+    NotificationsConfig,
     RetryConfig,
     SourceConfig,
     TokenCredential,
     WatchConfig,
+    WebhookConfig,
 )
 from .utils import infer_platform, parse_owner_from_profile_url, read_lines_file, resolve_secret
 
@@ -106,6 +108,7 @@ def config_from_dict(
             )
         ),
         lfs=bool(backup.get("lfs", cfg.backup.lfs)),
+        marker_enabled=bool(backup.get("marker_enabled", cfg.backup.marker_enabled)),
         marker_filename=_marker_filename(backup.get("marker_filename", cfg.backup.marker_filename)),
         push_mode=str(backup.get("push_mode", cfg.backup.push_mode)),
     )
@@ -133,6 +136,20 @@ def config_from_dict(
         action=_watch_action(watch.get("action", cfg.watch.action), "watch.action"),
         initial_run=bool(watch.get("initial_run", cfg.watch.initial_run)),
         once=bool(watch.get("once", cfg.watch.once)),
+    )
+
+    notifications = data.get("notifications", {})
+    cfg.notifications = NotificationsConfig(
+        enabled=bool(notifications.get("enabled", cfg.notifications.enabled)),
+        events=_event_list(notifications.get("events", cfg.notifications.events), "notifications.events"),
+        fail_silently=bool(notifications.get("fail_silently", cfg.notifications.fail_silently)),
+        timeout_seconds=float(notifications.get("timeout_seconds", cfg.notifications.timeout_seconds)),
+        webhooks=[
+            _webhook_from_dict(raw, idx)
+            for idx, raw in enumerate(
+                [*data.get("webhooks", []), *notifications.get("webhooks", [])]
+            )
+        ],
     )
 
     git = data.get("git", {})
@@ -264,6 +281,34 @@ def _destination_from_dict(raw: dict[str, Any]) -> DestinationConfig:
         allow_existing=bool(raw.get("allow_existing", True)),
         git_username=raw.get("git_username"),
         push_url_template=raw.get("push_url_template"),
+    )
+
+
+def _webhook_from_dict(raw: dict[str, Any], idx: int) -> WebhookConfig:
+    platform = str(raw.get("platform", raw.get("type", "generic"))).strip().lower()
+    if platform not in {"generic", "discord", "telegram"}:
+        raise ConfigError(f"webhook platform must be one of: generic, discord, telegram")
+    name = str(raw.get("name") or f"{platform}-{idx + 1}")
+    message_thread_id = raw.get("message_thread_id")
+    return WebhookConfig(
+        name=name,
+        platform=platform,
+        enabled=bool(raw.get("enabled", True)),
+        events=_event_list(raw.get("events", ["*"]), f"webhook {name} events"),
+        url=raw.get("url"),
+        url_env=raw.get("url_env"),
+        headers=_string_dict(raw.get("headers", {}), f"webhook {name} headers"),
+        username=raw.get("username"),
+        avatar_url=raw.get("avatar_url"),
+        thread_id=raw.get("thread_id"),
+        bot_token=raw.get("bot_token"),
+        bot_token_env=raw.get("bot_token_env"),
+        chat_id=raw.get("chat_id"),
+        chat_id_env=raw.get("chat_id_env"),
+        api_base=str(raw.get("api_base", "https://api.telegram.org")),
+        parse_mode=raw.get("parse_mode"),
+        message_thread_id=int(message_thread_id) if message_thread_id not in (None, "") else None,
+        disable_web_page_preview=bool(raw.get("disable_web_page_preview", True)),
     )
 
 
@@ -432,6 +477,25 @@ def _optional_positive_int(value: Any, field_name: str) -> int | None:
     if value in (None, ""):
         return None
     return _positive_int(value, field_name)
+
+
+def _event_list(value: Any, field_name: str) -> list[str]:
+    if value in (None, ""):
+        return ["*"]
+    if isinstance(value, str):
+        return [value.strip()]
+    if not isinstance(value, list):
+        raise ConfigError(f"{field_name} must be a string or list of strings")
+    events = [str(item).strip() for item in value if str(item).strip()]
+    return events or ["*"]
+
+
+def _string_dict(value: Any, field_name: str) -> dict[str, str]:
+    if value in (None, ""):
+        return {}
+    if not isinstance(value, dict):
+        raise ConfigError(f"{field_name} must be a table")
+    return {str(key): str(item) for key, item in value.items()}
 
 
 def _looks_like_github(url: str) -> bool:

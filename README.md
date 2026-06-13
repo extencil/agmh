@@ -300,7 +300,8 @@ agmh run --config agmh.config.toml --verbose
 ```
 
 This discovers source repositories, clones or updates local mirrors, adds the
-marker commit, creates destination repositories, and pushes mirrors.
+marker commit when `backup.marker_enabled` is true, creates destination
+repositories, and pushes mirrors.
 
 Local mirror only:
 
@@ -332,7 +333,8 @@ agmh run --config agmh.config.toml --mode remote --verbose
 
 This does not discover or clone from source forges. It reads mirrors recorded in
 `.agmh/state.json`, falls back to scanning `backup.local_dir`, adds the marker
-commit if needed, creates destination repositories, and pushes the local mirrors.
+commit if enabled and needed, creates destination repositories, and pushes the
+local mirrors.
 When AGMH has to scan local mirrors without state metadata, repository privacy is
 unknown, so it treats those repositories as private by default.
 
@@ -375,7 +377,7 @@ Watching actions:
 
 | Action | Behavior |
 | --- | --- |
-| `full` | Clone/update the local mirror, ensure the marker, create destinations, and push. |
+| `full` | Clone/update the local mirror, ensure the marker when enabled, create destinations, and push. |
 | `local` | Clone/update the local mirror only. |
 | `remote` | Push an existing local mirror for the changed repository. If the local mirror is missing, the action fails for that repository. |
 
@@ -476,6 +478,27 @@ action = "full"
 initial_run = true
 once = false
 
+[notifications]
+enabled = false
+events = ["*"]
+fail_silently = true
+timeout_seconds = 10
+
+# [[webhooks]]
+# name = "ops-discord"
+# platform = "discord"
+# url_env = "DISCORD_WEBHOOK_URL"
+# events = ["start", "finish", "error", "local_saved", "remote_saved", "watch_check", "watch_update", "watch_none"]
+# username = "AGMH"
+#
+# [[webhooks]]
+# name = "ops-telegram"
+# platform = "telegram"
+# bot_token_env = "TELEGRAM_BOT_TOKEN"
+# chat_id_env = "TELEGRAM_CHAT_ID"
+# events = ["start", "finish", "error", "watch_update"]
+# parse_mode = "HTML"
+
 # Inline sources are useful when a non-GitHub source needs a token or api_base.
 [[sources]]
 url = "https://gitlab.com/haltman-io"
@@ -491,6 +514,7 @@ include_archived = true
 include_forks = true
 include_private_for_authenticated_user = true
 lfs = false
+marker_enabled = true
 push_mode = "mirror"
 
 [retry]
@@ -504,7 +528,7 @@ wait_on_rate_limit = true
 [git]
 author_name = "root"
 author_email = "root@haltman.io"
-commit_message = "Add AGMH backup marker"
+commit_message = "Backuping with AGMH v{version}"
 # ssh_identity_file = "/home/user/.ssh/sourcehut_ed25519"
 # ssh_identities_only = true
 # ssh_batch_mode = false
@@ -599,6 +623,7 @@ Backup options:
 | `include_forks` | Include forked repositories. |
 | `include_private_for_authenticated_user` | When the token belongs to the source user, include private repositories. |
 | `lfs` | Run `git lfs fetch --all` after mirror updates. |
+| `marker_enabled` | Write a provenance marker commit before remote mirrors. Default: `true`. Set to `false` to avoid modifying mirrored repositories. |
 | `marker_filename` | Marker file name. Default: `agmh.txt`. |
 | `push_mode` | `mirror`, `portable-mirror`, `all`, or `default`. |
 
@@ -619,7 +644,7 @@ Git options:
 | --- | --- |
 | `author_name` | Git author name for marker commits. |
 | `author_email` | Git author email for marker commits. |
-| `commit_message` | Commit message for the marker commit. |
+| `commit_message` | Commit message for the marker commit. Supports `{version}`. Default: `Backuping with AGMH v{version}`. |
 | `ssh_identity_file` | Private key for Git SSH operations. |
 | `ssh_command` | Full `GIT_SSH_COMMAND` override. |
 | `ssh_identities_only` | Add `-o IdentitiesOnly=yes` when using `ssh_identity_file`. |
@@ -641,6 +666,83 @@ Destination options:
 | `allow_existing` | Treat existing repositories as usable. |
 | `git_username` | Username for HTTPS Git push URLs. |
 | `push_url_template` | Custom push URL, for example SourceHut SSH. |
+
+Notification options:
+
+| Key | Meaning |
+| --- | --- |
+| `enabled` | Enable webhook notifications. Default: `false`. |
+| `events` | Global event filter. Use `["*"]` for all enabled events. |
+| `fail_silently` | Log webhook delivery errors instead of failing the workflow. Default: `true`. |
+| `timeout_seconds` | HTTP timeout for webhook delivery. |
+
+Supported notification events:
+
+| Event | When it fires |
+| --- | --- |
+| `start` | Workflow starts, with a sanitized config snapshot. |
+| `finish` | Workflow finishes, with exit code. |
+| `local_saved` | A repository mirror was cloned or updated locally. |
+| `remote_saved` | A repository was pushed to a destination. |
+| `watch_check` | Watching mode starts checking a source for updates. |
+| `watch_update` | Watching mode found a changed or first-seen repository and includes the next action. |
+| `watch_none` | Watching mode found no updates and includes the next polling interval. |
+| `error` | A source discovery, clone, marker, create, push, or workflow error happened. |
+
+Webhook options:
+
+| Key | Meaning |
+| --- | --- |
+| `name` | Human-readable webhook name used in local warnings. |
+| `platform` | `generic`, `discord`, or `telegram`. |
+| `enabled` | Per-webhook enable switch. Default: `true`. |
+| `events` | Per-webhook event filter. Use `["*"]` for all events allowed globally. |
+| `url` / `url_env` | Generic or Discord webhook URL. Prefer `url_env`. |
+| `headers` | Extra headers for generic webhooks. |
+| `username` | Discord webhook username override. |
+| `avatar_url` | Discord webhook avatar override. |
+| `thread_id` | Discord forum/thread selector query parameter. |
+| `bot_token` / `bot_token_env` | Telegram bot token. Prefer `bot_token_env`. |
+| `chat_id` / `chat_id_env` | Telegram chat ID. |
+| `api_base` | Telegram API base URL. Default: `https://api.telegram.org`. |
+| `parse_mode` | Telegram parse mode, for example `HTML`. |
+| `message_thread_id` | Telegram forum topic ID. |
+| `disable_web_page_preview` | Telegram link preview switch. Default: `true`. |
+
+Example webhooks:
+
+```toml
+[notifications]
+enabled = true
+events = ["*"]
+fail_silently = true
+
+[[webhooks]]
+name = "ops-discord"
+platform = "discord"
+url_env = "DISCORD_WEBHOOK_URL"
+events = ["start", "finish", "error", "local_saved", "remote_saved", "watch_update"]
+username = "AGMH"
+
+[[webhooks]]
+name = "ops-telegram"
+platform = "telegram"
+bot_token_env = "TELEGRAM_BOT_TOKEN"
+chat_id_env = "TELEGRAM_CHAT_ID"
+events = ["error", "watch_update", "watch_none"]
+parse_mode = "HTML"
+
+[[webhooks]]
+name = "ops-generic"
+platform = "generic"
+url_env = "AGMH_WEBHOOK_URL"
+events = ["*"]
+```
+
+Webhook notifications never include token values, webhook URLs, Telegram bot
+tokens, or destination push URLs containing credentials. The `start` event
+includes sources, destinations, modes, counts, and other operational settings
+from a sanitized config snapshot.
 
 ## Tokens
 
@@ -675,6 +777,15 @@ SourceHut:
 
 ```bash
 export SOURCEHUT_TOKEN="..."
+```
+
+Webhooks:
+
+```bash
+export DISCORD_WEBHOOK_URL="..."
+export TELEGRAM_BOT_TOKEN="..."
+export TELEGRAM_CHAT_ID="..."
+export AGMH_WEBHOOK_URL="..."
 ```
 
 You can pass extra tokens from the CLI:
@@ -716,8 +827,8 @@ github-secondary = "env:GITHUB_TOKEN_2"
 
 ## Marker File
 
-Before pushing to destinations, AGMH writes a marker file into the default
-branch of the local mirror:
+By default, before pushing to destinations, AGMH writes a marker file into the
+default branch of the local mirror:
 
 ```txt
 agmh.txt
@@ -733,6 +844,16 @@ marker_created_at=2026-06-12T00:00:01Z
 
 This is intentional. It makes it clear where the backup came from and when the
 backup process created the provenance marker.
+
+Disable this repository modification with:
+
+```toml
+[backup]
+marker_enabled = false
+```
+
+When `marker_enabled` is `false`, AGMH does not create or update the marker file
+and does not create a marker commit before pushing to destinations.
 
 ## Push Modes
 
@@ -1219,6 +1340,9 @@ printenv GITHUB_DEST_TOKEN
 printenv GITLAB_TOKEN
 printenv CODEBERG_TOKEN
 printenv SOURCEHUT_TOKEN
+printenv DISCORD_WEBHOOK_URL
+printenv TELEGRAM_BOT_TOKEN
+printenv TELEGRAM_CHAT_ID
 ```
 
 Do not paste tokens into logs or issues.
@@ -1319,6 +1443,8 @@ PYTHONPATH=src python -m anti_gh_ms_hysteria run --help
 - SourceHut git.sr.ht GraphQL API docs: https://docs.sourcehut.org/git.sr.ht/
 - SourceHut GraphQL API docs: https://docs.sourcehut.org/
 - SourceHut: https://sourcehut.org/
+- Discord Webhook Resource: https://docs.discord.com/developers/resources/webhook
+- Telegram Bot API: https://core.telegram.org/bots/api
 - The Hacker's Choice: https://www.thc.org/
 - Segfault.net disposable root servers: https://www.thc.org/segfault/
 - Segfault.net service notes: https://www.thc.org/segfault/free/

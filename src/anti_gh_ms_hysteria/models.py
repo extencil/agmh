@@ -9,6 +9,7 @@ VisibilityMode = Literal["mirror", "public", "private", "unlisted"]
 PushMode = Literal["mirror", "portable-mirror", "all", "default"]
 WatchAction = Literal["full", "local", "remote"]
 WorkflowMode = Literal["full", "local", "remote", "watching"]
+WebhookPlatform = Literal["generic", "discord", "telegram"]
 
 
 @dataclass(frozen=True)
@@ -62,6 +63,7 @@ class BackupConfig:
     include_forks: bool = True
     include_private_for_authenticated_user: bool = True
     lfs: bool = False
+    marker_enabled: bool = True
     marker_filename: str = "agmh.txt"
     push_mode: PushMode = "mirror"
 
@@ -70,7 +72,7 @@ class BackupConfig:
 class GitConfig:
     author_name: str = "agmh"
     author_email: str = "agmh@localhost"
-    commit_message: str = "Add AGMH backup marker"
+    commit_message: str = "Backuping with AGMH v{version}"
     ssh_command: str | None = None
     ssh_identity_file: Path | None = None
     ssh_identities_only: bool = True
@@ -107,6 +109,37 @@ class WatchConfig:
 
 
 @dataclass
+class WebhookConfig:
+    name: str = "webhook"
+    platform: WebhookPlatform = "generic"
+    enabled: bool = True
+    events: list[str] = field(default_factory=lambda: ["*"])
+    url: str | None = None
+    url_env: str | None = None
+    headers: dict[str, str] = field(default_factory=dict)
+    username: str | None = None
+    avatar_url: str | None = None
+    thread_id: str | None = None
+    bot_token: str | None = None
+    bot_token_env: str | None = None
+    chat_id: str | None = None
+    chat_id_env: str | None = None
+    api_base: str = "https://api.telegram.org"
+    parse_mode: str | None = None
+    message_thread_id: int | None = None
+    disable_web_page_preview: bool = True
+
+
+@dataclass
+class NotificationsConfig:
+    enabled: bool = False
+    events: list[str] = field(default_factory=lambda: ["*"])
+    fail_silently: bool = True
+    timeout_seconds: float = 10.0
+    webhooks: list[WebhookConfig] = field(default_factory=list)
+
+
+@dataclass
 class DestinationConfig:
     url: str
     platform: str | None = None
@@ -139,6 +172,7 @@ class AppConfig:
     retry: RetryConfig = field(default_factory=RetryConfig)
     git: GitConfig = field(default_factory=GitConfig)
     watch: WatchConfig = field(default_factory=WatchConfig)
+    notifications: NotificationsConfig = field(default_factory=NotificationsConfig)
     resume: bool = True
     force: bool = False
 

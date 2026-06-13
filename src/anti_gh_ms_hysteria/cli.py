@@ -33,6 +33,26 @@ interval_seconds = 300
 action = "full"
 initial_run = true
 
+[notifications]
+enabled = false
+events = ["*"]
+fail_silently = true
+timeout_seconds = 10
+
+# [[webhooks]]
+# name = "ops-discord"
+# platform = "discord"
+# url_env = "DISCORD_WEBHOOK_URL"
+# events = ["start", "finish", "error", "local_saved", "remote_saved", "watch_check", "watch_update", "watch_none"]
+# username = "AGMH"
+#
+# [[webhooks]]
+# name = "ops-telegram"
+# platform = "telegram"
+# bot_token_env = "TELEGRAM_BOT_TOKEN"
+# chat_id_env = "TELEGRAM_CHAT_ID"
+# events = ["start", "finish", "error", "watch_update"]
+
 [github]
 tokens = [{ env = "GITHUB_TOKEN", name = "github-primary" }]
 
@@ -48,6 +68,7 @@ include_archived = true
 include_forks = true
 include_private_for_authenticated_user = true
 lfs = false
+marker_enabled = true
 push_mode = "mirror"
 
 [[destinations]]
@@ -60,7 +81,7 @@ push_mode = "mirror"
 [git]
 author_name = "agmh"
 author_email = "agmh@localhost"
-commit_message = "Add AGMH backup marker"
+commit_message = "Backuping with AGMH v{version}"
 # ssh_identity_file = "/home/user/.ssh/sourcehut_ed25519"
 # ssh_strict_host_key_checking = "accept-new"
 """

@@ -4,7 +4,7 @@ import os
 import re
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import quote, urlparse
+from urllib.parse import parse_qsl, quote, urlencode, urlparse, urlunparse
 
 
 SAFE_NAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
@@ -86,6 +86,38 @@ def scrub_secret(text: str, secrets: list[str]) -> str:
             scrubbed = scrubbed.replace(secret, "***")
             scrubbed = scrubbed.replace(quote(secret, safe=""), "***")
     return scrubbed
+
+
+def safe_display_url(url: str | None) -> str | None:
+    if not url:
+        return url
+    if "://" not in url and "@" in url:
+        return url
+    has_scheme = "://" in url
+    parsed = urlparse(url if has_scheme else f"https://{url}")
+    if not parsed.netloc:
+        return url
+    netloc = parsed.hostname or ""
+    try:
+        port = parsed.port
+    except ValueError:
+        return url
+    if port is not None:
+        netloc = f"{netloc}:{port}"
+    query = urlencode(
+        [
+            (key, "***" if _looks_sensitive_query_key(key) else value)
+            for key, value in parse_qsl(parsed.query, keep_blank_values=True)
+        ],
+        safe="*",
+    )
+    sanitized = urlunparse((parsed.scheme, netloc, parsed.path, parsed.params, query, parsed.fragment))
+    return sanitized if has_scheme else sanitized.removeprefix("https://")
+
+
+def _looks_sensitive_query_key(key: str) -> bool:
+    lowered = key.lower()
+    return any(part in lowered for part in ("token", "secret", "password", "passwd", "key"))
 
 
 def ensure_within(parent: Path, child: Path) -> None:

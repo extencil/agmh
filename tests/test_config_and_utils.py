@@ -25,6 +25,7 @@ from anti_gh_ms_hysteria.git_ops import (
     GitMirrorManager,
     build_git_ssh_command,
     git_failure_hint,
+    render_commit_message,
     source_auth_username,
 )
 from anti_gh_ms_hysteria.http import JsonResponse
@@ -34,11 +35,14 @@ from anti_gh_ms_hysteria.models import (
     DestinationConfig,
     GitConfig,
     GitHubConfig,
+    NotificationsConfig,
     RepoInfo,
     SourceConfig,
     TokenCredential,
     WatchConfig,
+    WebhookConfig,
 )
+from anti_gh_ms_hysteria.notifications import safe_config_snapshot
 from anti_gh_ms_hysteria.runner import MirrorRunner
 from anti_gh_ms_hysteria.sources import build_source
 from anti_gh_ms_hysteria.sources.bitbucket import BitbucketSource
@@ -47,7 +51,7 @@ from anti_gh_ms_hysteria.sources.github import GitHubSource
 from anti_gh_ms_hysteria.sources.gitlab import GitLabSource
 from anti_gh_ms_hysteria.sources.sourcehut import SourceHutSource
 from anti_gh_ms_hysteria.state import StateStore
-from anti_gh_ms_hysteria.utils import infer_platform, parse_owner_from_profile_url
+from anti_gh_ms_hysteria.utils import infer_platform, parse_owner_from_profile_url, safe_display_url
 
 
 class DummyUI:
@@ -142,6 +146,17 @@ class FakeWatchDiscovery:
         return []
 
 
+class FakeNotifier:
+    def __init__(self) -> None:
+        self.events: list[tuple[str, str, str, dict]] = []
+
+    def secrets(self) -> list[str]:
+        return []
+
+    def notify(self, event: str, title: str, message: str, data=None) -> None:
+        self.events.append((event, title, message, data or {}))
+
+
 def repo_info(name: str = "repo") -> RepoInfo:
     return RepoInfo(
         source_platform="github",
@@ -190,6 +205,16 @@ class UrlParsingTests(unittest.TestCase):
         self.assertEqual(source_from_url("https://bitbucket.org/extencil").platform, "bitbucket")
         self.assertEqual(source_from_url("https://git.sr.ht/~extencil").owner, "extencil")
 
+    def test_safe_display_url_strips_credentials_and_sensitive_query_values(self) -> None:
+        self.assertEqual(
+            safe_display_url("https://user:secret@example.com/owner?token=value&visibility=public"),
+            "https://example.com/owner?token=***&visibility=public",
+        )
+        self.assertEqual(
+            safe_display_url("git@github.com:owner/repo.git"),
+            "git@github.com:owner/repo.git",
+        )
+
 
 class TokenParsingTests(unittest.TestCase):
     def test_env_token(self) -> None:
@@ -222,9 +247,21 @@ class ConfigTests(unittest.TestCase):
     def test_default_generated_names_use_agmh(self) -> None:
         cfg = config_from_dict({}, Path.cwd())
         self.assertEqual(cfg.workspace, Path(".agmh"))
+        self.assertTrue(cfg.backup.marker_enabled)
         self.assertEqual(cfg.backup.marker_filename, "agmh.txt")
         self.assertEqual(cfg.git.author_name, "agmh")
         self.assertEqual(cfg.git.author_email, "agmh@localhost")
+        self.assertEqual(cfg.git.commit_message, "Backuping with AGMH v{version}")
+
+    def test_backup_marker_can_be_disabled(self) -> None:
+        cfg = config_from_dict({"backup": {"marker_enabled": False}}, Path.cwd())
+        self.assertFalse(cfg.backup.marker_enabled)
+
+    def test_commit_message_renders_package_version(self) -> None:
+        self.assertRegex(
+            render_commit_message("Backuping with AGMH v{version}"),
+            r"^Backuping with AGMH v\d+\.\d+\.\d+",
+        )
 
     def test_init_config_default_path_uses_agmh(self) -> None:
         args = build_parser().parse_args(["init-config"])
@@ -420,6 +457,89 @@ class ConfigTests(unittest.TestCase):
     def test_watch_interval_must_be_positive(self) -> None:
         with self.assertRaises(ConfigError):
             config_from_dict({"watch": {"interval_seconds": 0}}, Path.cwd())
+
+    def test_notifications_are_disabled_by_default(self) -> None:
+        cfg = config_from_dict({}, Path.cwd())
+        self.assertFalse(cfg.notifications.enabled)
+        self.assertEqual(cfg.notifications.webhooks, [])
+
+    def test_config_from_dict_accepts_multiple_webhooks(self) -> None:
+        cfg = config_from_dict(
+            {
+                "notifications": {
+                    "enabled": True,
+                    "events": ["start", "finish", "error"],
+                    "timeout_seconds": 3,
+                },
+                "webhooks": [
+                    {
+                        "name": "ops-discord",
+                        "platform": "discord",
+                        "url_env": "AGMH_DISCORD_WEBHOOK",
+                        "events": ["start", "error"],
+                        "username": "AGMH",
+                        "thread_id": "123",
+                    },
+                    {
+                        "name": "ops-telegram",
+                        "platform": "telegram",
+                        "bot_token_env": "AGMH_TELEGRAM_TOKEN",
+                        "chat_id": "-1001",
+                        "parse_mode": "HTML",
+                        "message_thread_id": 42,
+                    },
+                ],
+            },
+            Path.cwd(),
+        )
+        self.assertTrue(cfg.notifications.enabled)
+        self.assertEqual(cfg.notifications.timeout_seconds, 3)
+        self.assertEqual([webhook.platform for webhook in cfg.notifications.webhooks], ["discord", "telegram"])
+        self.assertEqual(cfg.notifications.webhooks[0].url_env, "AGMH_DISCORD_WEBHOOK")
+        self.assertEqual(cfg.notifications.webhooks[1].message_thread_id, 42)
+
+    def test_safe_config_snapshot_omits_secrets(self) -> None:
+        cfg = AppConfig(
+            sources=[
+                SourceConfig(
+                    url="https://user:source-url-secret@github.com/owner?token=source-query-secret",
+                    platform="github",
+                    api_base="https://api-user:source-api-secret@api.github.com",
+                    owner="owner",
+                    tokens=[TokenCredential("source-secret")],
+                )
+            ],
+            destinations=[
+                DestinationConfig(
+                    url="https://user:destination-url-secret@gitlab.com/owner?private_token=destination-query-secret",
+                    platform="gitlab",
+                    api_base="https://api-user:destination-api-secret@gitlab.com/api/v4",
+                    owner="owner",
+                    tokens=[TokenCredential("destination-secret")],
+                )
+            ],
+            notifications=NotificationsConfig(
+                enabled=True,
+                webhooks=[
+                    WebhookConfig(
+                        name="discord",
+                        platform="discord",
+                        url="https://discord.com/api/webhooks/secret",
+                    )
+                ],
+            ),
+        )
+        snapshot = str(safe_config_snapshot(cfg))
+        self.assertNotIn("source-secret", snapshot)
+        self.assertNotIn("destination-secret", snapshot)
+        self.assertNotIn("source-url-secret", snapshot)
+        self.assertNotIn("source-query-secret", snapshot)
+        self.assertNotIn("source-api-secret", snapshot)
+        self.assertNotIn("destination-url-secret", snapshot)
+        self.assertNotIn("destination-query-secret", snapshot)
+        self.assertNotIn("destination-api-secret", snapshot)
+        self.assertNotIn("discord.com/api/webhooks/secret", snapshot)
+        self.assertIn("'token_count': 1", snapshot)
 
 
 class StateTests(unittest.TestCase):
@@ -752,12 +872,36 @@ class RunnerTests(unittest.TestCase):
             runner = MirrorRunner(cfg, DummyUI())
             local_git = LocalOnlyGit(Path(tmp))
             runner.git = local_git
+            notifier = FakeNotifier()
+            runner.notifier = notifier
 
             result = runner._process_repo(repo_info())
 
         self.assertTrue(result)
         self.assertEqual(local_git.clone_calls, 1)
         self.assertEqual(local_git.marker_calls, 0)
+        self.assertIn("local_saved", [event[0] for event in notifier.events])
+
+    def test_marker_disabled_skips_marker_commit_in_full_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = AppConfig(
+                mode="full",
+                workspace=Path(tmp) / ".agmh",
+                backup=BackupConfig(local_dir=Path(tmp) / "backups", marker_enabled=False),
+            )
+            runner = MirrorRunner(cfg, DummyUI())
+            local_git = LocalOnlyGit(Path(tmp))
+            runner.git = local_git
+            notifier = FakeNotifier()
+            runner.notifier = notifier
+
+            result = runner._process_repo(repo_info())
+            marker_step = runner.state.repo("github:owner/repo").get("steps", {}).get("marker", {})
+
+        self.assertTrue(result)
+        self.assertEqual(local_git.clone_calls, 1)
+        self.assertEqual(local_git.marker_calls, 0)
+        self.assertEqual(marker_step.get("status"), "skipped")
 
     def test_remote_mode_pushes_existing_state_mirror(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -795,6 +939,8 @@ class RunnerTests(unittest.TestCase):
             state.mark_step("github:owner/repo", "marker", "done", branch="main")
 
             runner = MirrorRunner(cfg, DummyUI())
+            notifier = FakeNotifier()
+            runner.notifier = notifier
             pushes = []
 
             def record_push(path: Path, push_url: str, push_mode: str, default_branch: str | None) -> None:
@@ -805,6 +951,7 @@ class RunnerTests(unittest.TestCase):
 
         self.assertEqual(result, 0)
         self.assertEqual(pushes, [(mirror_path, "https://gitlab.com/owner/repo.git", "mirror", "main")])
+        self.assertIn("remote_saved", [event[0] for event in notifier.events])
 
     def test_remote_visibility_flag_overrides_destination_config(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -856,6 +1003,8 @@ class RunnerTests(unittest.TestCase):
                 watch=WatchConfig(once=True, action="full", interval_seconds=60),
             )
             runner = MirrorRunner(cfg, DummyUI())
+            notifier = FakeNotifier()
+            runner.notifier = notifier
             runner.source = FakeWatchDiscovery(source, [repo])
             processed = []
 
@@ -868,6 +1017,8 @@ class RunnerTests(unittest.TestCase):
 
         self.assertEqual(result, 0)
         self.assertEqual(processed, [("github:owner/repo", True, "local")])
+        self.assertIn("watch_check", [event[0] for event in notifier.events])
+        self.assertIn("watch_update", [event[0] for event in notifier.events])
 
     def test_watching_initial_run_false_marks_without_processing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -904,6 +1055,8 @@ class RunnerTests(unittest.TestCase):
                 watch=WatchConfig(once=True, action="local"),
             )
             runner = MirrorRunner(cfg, DummyUI())
+            notifier = FakeNotifier()
+            runner.notifier = notifier
             fake_source = FakeWatchDiscovery(source, [repo])
             runner.source = fake_source
             processed = []
@@ -920,6 +1073,7 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(first, 0)
         self.assertEqual(second, 0)
         self.assertEqual(processed, [])
+        self.assertIn("watch_none", [event[0] for event in notifier.events])
 
     def test_watching_processes_repo_when_fingerprint_changes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

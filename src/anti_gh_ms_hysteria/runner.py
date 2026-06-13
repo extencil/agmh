@@ -9,10 +9,11 @@ from .destinations import build_destination
 from .destinations.base import DestinationAdapter
 from .git_ops import GitCommandError, GitMirrorManager, GitRunner
 from .models import AppConfig, RepoInfo
+from .notifications import Notifier, safe_config_snapshot
 from .sources import SourceDiscovery
 from .state import StateStore
 from .ui import UI
-from .utils import scrub_secret, utc_now_iso
+from .utils import safe_display_url, scrub_secret, utc_now_iso
 
 
 @dataclass(frozen=True)
@@ -29,9 +30,11 @@ class MirrorRunner:
         self.ui = ui
         self.source = SourceDiscovery(cfg, ui)
         self.destinations = [build_destination(dest, cfg, ui) for dest in cfg.destinations]
+        self.notifier = Notifier(cfg, ui)
         secrets = self.source.secrets()
         for dest in self.destinations:
             secrets.extend(dest.token_pool.all_secrets())
+        secrets.extend(self.notifier.secrets())
         self.git_runner = GitRunner(cfg, ui, secrets)
         self.git = GitMirrorManager(cfg, ui, self.git_runner)
         self.state = StateStore(cfg.workspace / "state.json")
@@ -41,6 +44,26 @@ class MirrorRunner:
         return self.source.discover()
 
     def run(self) -> int:
+        self.notifier.notify(
+            "start",
+            "AGMH started",
+            f"Running mode {self.cfg.mode}",
+            {"mode": self.cfg.mode, "config": safe_config_snapshot(self.cfg)},
+        )
+        try:
+            result = self._run()
+        except Exception as exc:
+            self._notify_error("Unhandled workflow error", error=str(exc))
+            raise
+        self.notifier.notify(
+            "finish",
+            "AGMH finished",
+            f"Finished mode {self.cfg.mode} with exit code {result}",
+            {"mode": self.cfg.mode, "exit_code": result},
+        )
+        return result
+
+    def _run(self) -> int:
         if self.cfg.mode == "remote":
             return self._run_remote_mirror()
         if self.cfg.mode == "watching":
@@ -49,6 +72,8 @@ class MirrorRunner:
         repos = self.discover()
         self.ui.info(f"Discovered {len(repos)} source repositories")
         discovery_failures = len(self.source.discovery_errors)
+        for source_url, error in self.source.discovery_errors:
+            self._notify_error("Source discovery failed", source={"url": source_url}, error=error)
         failures = discovery_failures
         for repo in repos:
             ok = self._process_repo(repo)
@@ -71,10 +96,12 @@ class MirrorRunner:
         mirrors = self._local_mirrors()
         self.ui.info(f"Loaded {len(mirrors)} local mirrors")
         if not mirrors:
-            self.ui.error(
+            message = (
                 f"No local mirrors found in state or under {self.cfg.backup.local_dir}. "
                 "Run local-mirror first or set backup.local_dir to the mirror directory."
             )
+            self.ui.error(message)
+            self._notify_error("Remote mirror has no local mirrors", error=message)
             return 1
 
         failures = 0
@@ -90,7 +117,9 @@ class MirrorRunner:
     def _run_watching(self) -> int:
         enabled_sources = [source for source in self.source.sources if source.source.watch]
         if not enabled_sources:
-            self.ui.error("Watching mode has no enabled sources")
+            message = "Watching mode has no enabled sources"
+            self.ui.error(message)
+            self._notify_error("Watching mode has no enabled sources", error=message)
             return 1
 
         self.ui.info(
@@ -126,16 +155,41 @@ class MirrorRunner:
         action = source.source.watch_action or self.cfg.watch.action
         interval = _source_watch_interval(source.source.watch_interval_seconds, self.cfg.watch.interval_seconds)
         self.ui.info(f"Polling {source.key}; action={action}, interval={interval}s")
+        self.notifier.notify(
+            "watch_check",
+            "Checking source updates",
+            f"Checking {source.key} for repository updates",
+            {"source": _source_payload(source), "action": action, "next_check_in_seconds": interval},
+        )
         failures = 0
         discovery_errors_before = len(self.source.discovery_errors)
         repos = self.source.discover_one(source)
         if len(self.source.discovery_errors) > discovery_errors_before:
             failures += 1
+            for source_url, error in self.source.discovery_errors[discovery_errors_before:]:
+                self._notify_error(
+                    "Source discovery failed",
+                    source={"url": source_url},
+                    error=error,
+                )
+        found_updates = 0
         for repo in repos:
             should_process, reason, fingerprint = self._watch_decision(repo)
             if not should_process:
                 continue
+            found_updates += 1
             self.ui.info(f"Watching detected {reason} for {repo.full_name}; running {action} workflow")
+            self.notifier.notify(
+                "watch_update",
+                "Source update found",
+                f"{repo.full_name} changed; next action: {action}",
+                {
+                    "source": _source_payload(source),
+                    "repository": _repo_payload(repo),
+                    "action": action,
+                    "reason": reason,
+                },
+            )
             ok = self._process_watched_repo(repo, action)
             if ok:
                 self.state.mark_watch(
@@ -157,6 +211,13 @@ class MirrorRunner:
                     action=action,
                     reason=reason,
                 )
+        if found_updates == 0:
+            self.notifier.notify(
+                "watch_none",
+                "No source updates found",
+                f"No updates found for {source.key}; next check in {interval}s",
+                {"source": _source_payload(source), "next_check_in_seconds": interval},
+            )
         return failures
 
     def _watch_decision(self, repo: RepoInfo) -> tuple[bool, str, str]:
@@ -193,7 +254,9 @@ class MirrorRunner:
             return self._process_repo(repo, force_workflow=True, workflow_mode=action)
         mirror_path = self.git.mirror_path(repo)
         if not mirror_path.exists():
-            self.ui.error(f"Remote watch action needs an existing local mirror for {repo.full_name}: {mirror_path}")
+            message = f"Remote watch action needs an existing local mirror for {repo.full_name}: {mirror_path}"
+            self.ui.error(message)
+            self._notify_error("Remote watch action missing local mirror", repo=repo, error=message)
             return False
         mirror = LocalMirror(repo=repo, path=mirror_path, downloaded_at=utc_now_iso())
         return self._process_local_mirror(mirror, force_workflow=True)
@@ -252,9 +315,21 @@ class MirrorRunner:
                 token = self.source.current_token(repo)
                 mirror_path, downloaded_at = self.git.clone_or_update(repo, token)
                 self._mark_step(key, "clone", "done", path=str(mirror_path), downloaded_at=downloaded_at)
+                self.notifier.notify(
+                    "local_saved",
+                    "Repository saved locally",
+                    f"Saved local mirror for {repo.full_name}",
+                    {
+                        "repository": _repo_payload(repo),
+                        "path": str(mirror_path),
+                        "downloaded_at": downloaded_at,
+                        "mode": workflow_mode,
+                    },
+                )
         except Exception as exc:
             self._mark_step(key, "clone", "failed", error=str(exc))
             self.ui.error(f"Clone/update failed for {repo.full_name}: {exc}")
+            self._notify_error("Clone/update failed", repo=repo, error=str(exc))
             return False
 
         if workflow_mode == "local":
@@ -283,6 +358,11 @@ class MirrorRunner:
         if not mirror_path.exists():
             self._mark_step(key, "remote-mirror", "failed", error=f"Local mirror does not exist: {mirror_path}")
             self.ui.error(f"Local mirror does not exist for {repo.full_name}: {mirror_path}")
+            self._notify_error(
+                "Local mirror does not exist",
+                repo=repo,
+                error=f"Local mirror does not exist: {mirror_path}",
+            )
             return False
         if not mirror.privacy_known:
             self.ui.warning(
@@ -299,18 +379,23 @@ class MirrorRunner:
         force_workflow: bool = False,
     ) -> bool:
         key = repo.key
-        try:
-            if self._should_skip_step(key, "marker", force_workflow):
-                self.ui.info(f"Skipping marker for {repo.full_name}; state already marks it done")
-                marker_step = self.state.repo(key).get("steps", {}).get("marker", {})
-                branch = marker_step.get("branch", branch)
-            else:
-                branch = self.git.ensure_marker_commit(repo, mirror_path, downloaded_at)
-                self._mark_step(key, "marker", "done", branch=branch)
-        except Exception as exc:
-            self._mark_step(key, "marker", "failed", error=str(exc))
-            self.ui.error(f"Marker commit failed for {repo.full_name}: {exc}")
-            return False
+        if not self.cfg.backup.marker_enabled:
+            self.ui.info(f"Marker disabled; leaving {repo.full_name} unchanged before remote mirror")
+            self._mark_step(key, "marker", "skipped", branch=branch)
+        else:
+            try:
+                if self._should_skip_step(key, "marker", force_workflow):
+                    self.ui.info(f"Skipping marker for {repo.full_name}; state already marks it done")
+                    marker_step = self.state.repo(key).get("steps", {}).get("marker", {})
+                    branch = marker_step.get("branch", branch)
+                else:
+                    branch = self.git.ensure_marker_commit(repo, mirror_path, downloaded_at)
+                    self._mark_step(key, "marker", "done", branch=branch)
+            except Exception as exc:
+                self._mark_step(key, "marker", "failed", error=str(exc))
+                self.ui.error(f"Marker commit failed for {repo.full_name}: {exc}")
+                self._notify_error("Marker commit failed", repo=repo, error=str(exc))
+                return False
 
         destination_failures = 0
         for destination in self.destinations:
@@ -432,6 +517,12 @@ class MirrorRunner:
         except Exception as exc:
             self._mark_destination(key, dest_key, "create", "failed", error=str(exc))
             self.ui.error(f"Create failed for {repo.full_name} on {dest_key}: {exc}")
+            self._notify_error(
+                "Destination create failed",
+                repo=repo,
+                destination=_destination_payload(destination, repo),
+                error=str(exc),
+            )
             return False
 
         try:
@@ -440,9 +531,25 @@ class MirrorRunner:
             else:
                 self._push_with_rotation(repo, mirror_path, branch, destination)
                 self._mark_destination(key, dest_key, "push", "done")
+                self.notifier.notify(
+                    "remote_saved",
+                    "Repository saved remotely",
+                    f"Saved {repo.full_name} to {dest_key}",
+                    {
+                        "repository": _repo_payload(repo),
+                        "destination": _destination_payload(destination, repo),
+                        "branch": branch,
+                    },
+                )
         except Exception as exc:
             self._mark_destination(key, dest_key, "push", "failed", error=str(exc))
             self.ui.error(f"Push failed for {repo.full_name} to {dest_key}: {exc}")
+            self._notify_error(
+                "Destination push failed",
+                repo=repo,
+                destination=_destination_payload(destination, repo),
+                error=str(exc),
+            )
             return False
         return True
 
@@ -519,6 +626,23 @@ class MirrorRunner:
             status = "planned"
         self.state.mark_destination(key, destination_key, step, status, **extra)
 
+    def _notify_error(
+        self,
+        title: str,
+        repo: RepoInfo | None = None,
+        destination: dict | None = None,
+        source: dict | None = None,
+        error: str | None = None,
+    ) -> None:
+        data = {
+            "mode": self.cfg.mode,
+            "repository": _repo_payload(repo) if repo else None,
+            "destination": destination,
+            "source": source,
+            "error": scrub_secret(error or title, self.secrets),
+        }
+        self.notifier.notify("error", title, scrub_secret(error or title, self.secrets), data)
+
 
 def _looks_like_git_rate_limit(text: str) -> bool:
     return "rate limit" in text or "too many requests" in text or "http 429" in text
@@ -561,6 +685,49 @@ def _watch_sleep_seconds(next_poll: dict[str, float]) -> float:
     if not next_poll:
         return 1.0
     return max(1.0, min(next_poll.values()) - time.monotonic())
+
+
+def _repo_payload(repo: RepoInfo | None) -> dict | None:
+    if repo is None:
+        return None
+    return {
+        "key": repo.key,
+        "source_platform": repo.source_platform,
+        "owner": repo.owner,
+        "name": repo.name,
+        "full_name": repo.full_name,
+        "web_url": safe_display_url(repo.web_url),
+        "default_branch": repo.default_branch,
+        "private": repo.private,
+        "visibility": repo.visibility,
+        "updated_at": repo.updated_at,
+    }
+
+
+def _source_payload(source) -> dict:
+    config = source.source
+    return {
+        "key": source.key,
+        "url": safe_display_url(config.url),
+        "platform": config.platform,
+        "owner": config.owner,
+        "watch": config.watch,
+        "watch_interval_seconds": config.watch_interval_seconds,
+        "watch_action": config.watch_action,
+    }
+
+
+def _destination_payload(destination: DestinationAdapter, repo: RepoInfo) -> dict:
+    return {
+        "key": destination.key,
+        "platform": destination.platform,
+        "url": safe_display_url(destination.dest.url),
+        "owner": destination.owner,
+        "repository": destination.destination_repo_name(repo),
+        "web_url": safe_display_url(destination.web_url(repo)),
+        "visibility": destination.visibility_for(repo),
+        "push_mode": destination.dest.push_mode,
+    }
 
 
 def _full_name_from_key(key: str) -> str:

@@ -7,6 +7,7 @@ import subprocess
 from pathlib import Path
 from urllib.parse import quote, urlparse, urlunparse
 
+from . import __version__
 from .models import AppConfig, RepoInfo, TokenCredential
 from .ui import UI
 from .utils import ensure_within, safe_path_part, scrub_secret, utc_now_iso
@@ -188,7 +189,7 @@ class GitMirrorManager:
                         f"user.email={self.cfg.git.author_email}",
                         "commit",
                         "-m",
-                        self.cfg.git.commit_message,
+                        render_commit_message(self.cfg.git.commit_message),
                     ]
                 )
                 self.runner.run(["git", "-C", str(workdir), "push", "origin", f"HEAD:refs/heads/{branch}"])
@@ -243,6 +244,10 @@ def with_basic_auth(url: str, username: str, secret: str) -> str:
     secret_q = quote(secret, safe="")
     netloc = f"{username_q}:{secret_q}@{parsed.netloc}"
     return urlunparse((parsed.scheme, netloc, parsed.path, parsed.params, parsed.query, parsed.fragment))
+
+
+def render_commit_message(template: str) -> str:
+    return template.replace("{version}", __version__)
 
 
 def source_auth_username(repo: RepoInfo, token: TokenCredential) -> str:
