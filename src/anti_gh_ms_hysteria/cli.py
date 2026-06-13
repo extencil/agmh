@@ -19,7 +19,7 @@ from .runner import MirrorRunner
 from .ui import UI, setup_logging
 
 
-SAMPLE_CONFIG = """workspace = ".aghm"
+SAMPLE_CONFIG = """workspace = ".agmh"
 mode = "full"
 dry_run = false
 verbose = 0
@@ -46,6 +46,9 @@ visibility = "mirror"
 push_mode = "mirror"
 
 [git]
+author_name = "agmh"
+author_email = "agmh@localhost"
+commit_message = "Add AGMH backup marker"
 # ssh_identity_file = "/home/user/.ssh/sourcehut_ed25519"
 # ssh_strict_host_key_checking = "accept-new"
 """
@@ -90,7 +93,7 @@ def build_parser() -> argparse.ArgumentParser:
     discover.set_defaults(handler=discover_command)
 
     init = sub.add_parser("init-config", help="write a starter TOML config")
-    init.add_argument("--path", type=Path, default=Path("aghm.config.toml"))
+    init.add_argument("--path", type=Path, default=Path("agmh.config.toml"))
     init.add_argument("--force", action="store_true")
     init.set_defaults(handler=init_config_command)
 

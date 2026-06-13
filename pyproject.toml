@@ -3,7 +3,7 @@ requires = ["setuptools>=69"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "anti-gh-ms-hysteria"
+name = "agmh"
 version = "0.1.0"
 description = "AGMH, a local GitHub backup and repository mirroring CLI."
 readme = "README.md"
@@ -17,8 +17,6 @@ tui = ["rich>=13.7"]
 
 [project.scripts]
 agmh = "anti_gh_ms_hysteria.cli:main"
-aghm = "anti_gh_ms_hysteria.cli:main"
-anti-gh-ms-hysteria = "anti_gh_ms_hysteria.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

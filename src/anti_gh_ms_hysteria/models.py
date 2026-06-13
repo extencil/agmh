@@ -59,15 +59,15 @@ class BackupConfig:
     include_forks: bool = True
     include_private_for_authenticated_user: bool = True
     lfs: bool = False
-    marker_filename: str = "anti-gh-ms-hysteria.txt"
+    marker_filename: str = "agmh.txt"
     push_mode: PushMode = "mirror"
 
 
 @dataclass
 class GitConfig:
-    author_name: str = "anti-GH-MS-hysteria"
-    author_email: str = "anti-gh-ms-hysteria@localhost"
-    commit_message: str = "Add anti-GH-MS-hysteria backup marker"
+    author_name: str = "agmh"
+    author_email: str = "agmh@localhost"
+    commit_message: str = "Add AGMH backup marker"
     ssh_command: str | None = None
     ssh_identity_file: Path | None = None
     ssh_identities_only: bool = True
@@ -101,7 +101,7 @@ class DestinationConfig:
 @dataclass
 class AppConfig:
     mode: WorkflowMode = "full"
-    workspace: Path = Path(".aghm")
+    workspace: Path = Path(".agmh")
     dry_run: bool = False
     verbose: int = 0
     tui: bool = True

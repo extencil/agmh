@@ -15,9 +15,12 @@ from anti_gh_ms_hysteria.config import (
     parse_destination_token,
 )
 from anti_gh_ms_hysteria.cli import build_config_from_args, build_parser
+from anti_gh_ms_hysteria.destinations import build_destination
+from anti_gh_ms_hysteria.destinations.github import GitHubDestination
 from anti_gh_ms_hysteria.destinations.gitlab import GitLabDestination
 from anti_gh_ms_hysteria.destinations.gitlab import gitlab_safe_project_path
 from anti_gh_ms_hysteria.git_ops import GitMirrorManager, build_git_ssh_command, git_failure_hint
+from anti_gh_ms_hysteria.http import JsonResponse
 from anti_gh_ms_hysteria.models import (
     AppConfig,
     BackupConfig,
@@ -83,6 +86,25 @@ class LocalOnlyGit:
         raise AssertionError("local mode must not create marker commits")
 
 
+class FakeGitHubClient:
+    def __init__(self, login: str) -> None:
+        self.login = login
+        self.requests: list[tuple[str, str, dict | None]] = []
+
+    def request_json(self, method: str, path: str, body=None, **kwargs):
+        self.requests.append((method, path, body))
+        if method == "GET" and path == "/user":
+            return JsonResponse({"login": self.login}, {}, 200)
+        return JsonResponse(
+            {
+                "html_url": "https://github.com/dest/repo",
+                "clone_url": "https://github.com/dest/repo.git",
+            },
+            {},
+            201,
+        )
+
+
 def repo_info(name: str = "repo") -> RepoInfo:
     return RepoInfo(
         source_platform="github",
@@ -116,13 +138,18 @@ class UrlParsingTests(unittest.TestCase):
         self.assertEqual(dest.platform, "gitlab")
         self.assertEqual(dest.owner, "group/subgroup")
 
+    def test_github_destination_url_is_supported(self) -> None:
+        dest = destination_from_url("https://github.com/destination-owner")
+        self.assertEqual(dest.platform, "github")
+        self.assertEqual(dest.owner, "destination-owner")
+
 
 class TokenParsingTests(unittest.TestCase):
     def test_env_token(self) -> None:
-        os.environ["AGHM_TEST_TOKEN"] = "secret"
-        token = parse_cli_token("env:AGHM_TEST_TOKEN")
+        os.environ["AGMH_TEST_TOKEN"] = "secret"
+        token = parse_cli_token("env:AGMH_TEST_TOKEN")
         self.assertEqual(token.secret, "secret")
-        self.assertEqual(token.name, "AGHM_TEST_TOKEN")
+        self.assertEqual(token.name, "AGMH_TEST_TOKEN")
 
     def test_username_token(self) -> None:
         platform, token = parse_destination_token("bitbucket:you@example.com:secret")
@@ -132,8 +159,19 @@ class TokenParsingTests(unittest.TestCase):
 
 
 class ConfigTests(unittest.TestCase):
+    def test_default_generated_names_use_agmh(self) -> None:
+        cfg = config_from_dict({}, Path.cwd())
+        self.assertEqual(cfg.workspace, Path(".agmh"))
+        self.assertEqual(cfg.backup.marker_filename, "agmh.txt")
+        self.assertEqual(cfg.git.author_name, "agmh")
+        self.assertEqual(cfg.git.author_email, "agmh@localhost")
+
+    def test_init_config_default_path_uses_agmh(self) -> None:
+        args = build_parser().parse_args(["init-config"])
+        self.assertEqual(args.path, Path("agmh.config.toml"))
+
     def test_config_from_dict_resolves_paths_and_tokens(self) -> None:
-        os.environ["AGHM_GH"] = "gh-secret"
+        os.environ["AGMH_GH"] = "gh-secret"
         with tempfile.TemporaryDirectory() as tmp:
             cfg = config_from_dict(
                 {
@@ -141,7 +179,7 @@ class ConfigTests(unittest.TestCase):
                     "insecure_tls": True,
                     "github": {
                         "profiles": ["https://github.com/extencil"],
-                        "tokens": [{"env": "AGHM_GH", "name": "test"}],
+                        "tokens": [{"env": "AGMH_GH", "name": "test"}],
                     },
                     "destinations": [{"url": "https://codeberg.org/extencil"}],
                 },
@@ -153,14 +191,14 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(cfg.destinations[0].platform, "forgejo")
 
     def test_github_tokens_accept_named_table(self) -> None:
-        os.environ["AGHM_GH_1"] = "gh-secret-1"
-        os.environ["AGHM_GH_2"] = "gh-secret-2"
+        os.environ["AGMH_GH_1"] = "gh-secret-1"
+        os.environ["AGMH_GH_2"] = "gh-secret-2"
         cfg = config_from_dict(
             {
                 "github": {
                     "tokens": {
-                        "github-primary": {"env": "AGHM_GH_1"},
-                        "github-secondary": "env:AGHM_GH_2",
+                        "github-primary": {"env": "AGMH_GH_1"},
+                        "github-secondary": "env:AGMH_GH_2",
                     }
                 }
             },
@@ -177,7 +215,7 @@ class ConfigTests(unittest.TestCase):
 
     def test_invalid_toml_token_array_reports_helpful_config_error(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "aghm.config.toml"
+            path = Path(tmp) / "agmh.config.toml"
             path.write_text(
                 "\n".join(
                     [
@@ -206,14 +244,14 @@ class ConfigTests(unittest.TestCase):
             config_from_dict({"backup": {"marker_filename": "../evil.txt"}}, Path.cwd())
 
     def test_local_mode_does_not_require_destination_token_envs(self) -> None:
-        os.environ.pop("AGHM_MISSING_DEST_TOKEN", None)
+        os.environ.pop("AGMH_MISSING_DEST_TOKEN", None)
         cfg = config_from_dict(
             {
                 "mode": "local",
                 "destinations": [
                     {
                         "url": "https://gitlab.com/extencil",
-                        "tokens": [{"env": "AGHM_MISSING_DEST_TOKEN"}],
+                        "tokens": [{"env": "AGMH_MISSING_DEST_TOKEN"}],
                     }
                 ],
             },
@@ -223,11 +261,11 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(cfg.destinations, [])
 
     def test_remote_mode_does_not_require_github_token_envs(self) -> None:
-        os.environ.pop("AGHM_MISSING_GITHUB_TOKEN", None)
+        os.environ.pop("AGMH_MISSING_GITHUB_TOKEN", None)
         cfg = config_from_dict(
             {
                 "mode": "remote",
-                "github": {"tokens": [{"env": "AGHM_MISSING_GITHUB_TOKEN"}]},
+                "github": {"tokens": [{"env": "AGMH_MISSING_GITHUB_TOKEN"}]},
             },
             Path.cwd(),
         )
@@ -306,6 +344,66 @@ class DestinationMappingTests(unittest.TestCase):
             "https://gitlab.com/group/repo.git",
         )
 
+    def test_builds_github_destination(self) -> None:
+        destination = build_destination(
+            DestinationConfig(url="https://github.com/dest", platform="github", owner="dest"),
+            AppConfig(),
+            DummyUI(),
+        )
+        self.assertIsInstance(destination, GitHubDestination)
+
+    def test_github_destination_push_url_and_auth(self) -> None:
+        destination = GitHubDestination(
+            DestinationConfig(
+                url="https://github.com/dest",
+                platform="github",
+                owner="dest",
+                tokens=[TokenCredential("secret")],
+            ),
+            AppConfig(),
+            DummyUI(),
+        )
+        self.assertEqual(destination.default_push_url(repo_info()), "https://github.com/dest/repo.git")
+        self.assertEqual(
+            destination.push_urls(repo_info()),
+            ["https://x-access-token:secret@github.com/dest/repo.git"],
+        )
+        self.assertEqual(destination.push_mode_for("mirror"), "portable-mirror")
+        self.assertEqual(destination.push_mode_for("default"), "default")
+
+    def test_github_destination_creates_user_repo(self) -> None:
+        destination = GitHubDestination(
+            DestinationConfig(url="https://github.com/dest", platform="github", owner="dest"),
+            AppConfig(),
+            DummyUI(),
+        )
+        fake_client = FakeGitHubClient("dest")
+        destination.client = fake_client
+
+        created = destination.create_repository(RepoInfo(**{**repo_info().__dict__, "private": True}))
+
+        self.assertTrue(created.created)
+        self.assertEqual(
+            fake_client.requests[1],
+            ("POST", "/user/repos", {"name": "repo", "private": True, "auto_init": False}),
+        )
+
+    def test_github_destination_creates_org_repo(self) -> None:
+        destination = GitHubDestination(
+            DestinationConfig(url="https://github.com/org", platform="github", owner="org", visibility="public"),
+            AppConfig(),
+            DummyUI(),
+        )
+        fake_client = FakeGitHubClient("user")
+        destination.client = fake_client
+
+        destination.create_repository(RepoInfo(**{**repo_info().__dict__, "private": True}))
+
+        self.assertEqual(
+            fake_client.requests[1],
+            ("POST", "/orgs/org/repos", {"name": "repo", "private": False, "auto_init": False}),
+        )
+
     def test_gitlab_hidden_repo_name_gets_legal_path(self) -> None:
         self.assertEqual(gitlab_safe_project_path(".github"), "dot-github")
 
@@ -342,7 +440,7 @@ class RunnerTests(unittest.TestCase):
     def test_run_fails_when_source_discovery_fails(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             cfg = AppConfig(
-                workspace=Path(tmp) / ".aghm",
+                workspace=Path(tmp) / ".agmh",
                 github=GitHubConfig(profiles=["https://gitlab.com/not-github"]),
             )
             result = MirrorRunner(cfg, DummyUI()).run()
@@ -352,7 +450,7 @@ class RunnerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             cfg = AppConfig(
                 mode="local",
-                workspace=Path(tmp) / ".aghm",
+                workspace=Path(tmp) / ".agmh",
                 backup=BackupConfig(local_dir=Path(tmp) / "backups"),
                 github=GitHubConfig(profiles=["https://github.com/owner"]),
             )
@@ -373,7 +471,7 @@ class RunnerTests(unittest.TestCase):
             (mirror_path / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
             cfg = AppConfig(
                 mode="remote",
-                workspace=Path(tmp) / ".aghm",
+                workspace=Path(tmp) / ".agmh",
                 backup=BackupConfig(local_dir=Path(tmp) / "backups"),
                 destinations=[
                     DestinationConfig(
@@ -415,7 +513,7 @@ class RunnerTests(unittest.TestCase):
 
     def test_remote_visibility_flag_overrides_destination_config(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            config_path = Path(tmp) / "aghm.config.toml"
+            config_path = Path(tmp) / "agmh.config.toml"
             config_path.write_text(
                 "\n".join(
                     [

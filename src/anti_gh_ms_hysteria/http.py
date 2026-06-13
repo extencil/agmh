@@ -40,7 +40,7 @@ class ApiClient:
         auth_style: str = "bearer",
         proxy: str | None = None,
         insecure_tls: bool = False,
-        user_agent: str = "anti-GH-MS-hysteria/0.1",
+        user_agent: str = "agmh/0.1",
     ):
         self.base_url = base_url.rstrip("/")
         self.token_pool = token_pool

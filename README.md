@@ -16,7 +16,7 @@ it to other forges without losing years of history, branches, tags, or research.
 
 It discovers repositories from GitHub profiles or organizations, clones them
 locally as mirrors, adds a small provenance marker file, creates matching
-repositories on destination platforms, and pushes the backup to GitLab,
+repositories on destination platforms, and pushes the backup to GitHub, GitLab,
 Codeberg/Forgejo, SourceHut, Bitbucket, or compatible Git remotes.
 
 The primary CLI command is:
@@ -25,7 +25,8 @@ The primary CLI command is:
 agmh
 ```
 
-The older `aghm` alias still works for compatibility.
+The legacy typo `aghm` was removed. AGMH intentionally uses `agmh` for commands,
+default config files, state directories, logs, and generated marker files.
 
 ## Project Statement
 
@@ -140,12 +141,12 @@ AGMH can:
 - Run in local-only mode to download/update mirrors without pushing anywhere.
 - Run in remote-only mode to push existing local mirrors to configured destinations later.
 - Keep a local backup under `backups/` by default.
-- Add `anti-gh-ms-hysteria.txt` to the default branch before mirroring.
+- Add `agmh.txt` to the default branch before mirroring.
 - Create destination repositories through platform APIs.
 - Preserve repository name and public/private visibility where supported.
-- Push mirrors to GitLab, Codeberg/Forgejo, SourceHut, Bitbucket, and similar Git destinations.
-- Use resumable state in `.aghm/state.json`.
-- Write detailed logs to `.aghm/logs/`.
+- Push mirrors to GitHub, GitLab, Codeberg/Forgejo, SourceHut, Bitbucket, and similar Git destinations.
+- Use resumable state in `.agmh/state.json`.
+- Write detailed logs to `.agmh/logs/`.
 - Run dry-run simulations.
 - Use proxies.
 - Disable TLS verification when needed for intercepting proxies.
@@ -160,6 +161,7 @@ Destination support:
 
 | Platform | API create | HTTPS push | SSH push | Notes |
 | --- | --- | --- | --- | --- |
+| GitHub | Yes | Yes | Possible with custom URL | Use a destination token with repo creation and push permissions. GitHub Enterprise can use `api_base`. |
 | GitLab | Yes | Yes | Possible with custom URL | Hidden repo names such as `.github` are mapped to valid GitLab paths such as `dot-github`. |
 | Codeberg | Yes | Yes | Possible with custom URL | Uses Forgejo API. GitHub `refs/pull/*` refs are excluded in portable mirror mode because Codeberg rejects hidden refs. |
 | Forgejo/Gitea | Yes | Yes | Possible with custom URL | Same adapter family as Codeberg. |
@@ -224,14 +226,6 @@ agmh --help
 agmh run --help
 ```
 
-Compatibility aliases:
-
-```bash
-aghm --help
-anti-gh-ms-hysteria --help
-python -m anti_gh_ms_hysteria --help
-```
-
 If you do not install the package, you can run it with `PYTHONPATH`:
 
 ```bash
@@ -265,6 +259,7 @@ Export tokens:
 
 ```bash
 export GITHUB_TOKEN="github_token_here"
+export GITHUB_DEST_TOKEN="github_destination_token_here"
 export GITLAB_TOKEN="gitlab_token_here"
 export CODEBERG_TOKEN="codeberg_token_here"
 export SOURCEHUT_TOKEN="sourcehut_token_here"
@@ -328,7 +323,7 @@ agmh run --config agmh.config.toml --mode remote --verbose
 ```
 
 This does not discover or clone from GitHub. It reads mirrors recorded in
-`.aghm/state.json`, falls back to scanning `backup.local_dir`, adds the marker
+`.agmh/state.json`, falls back to scanning `backup.local_dir`, adds the marker
 commit if needed, creates destination repositories, and pushes the local mirrors.
 When AGMH has to scan local mirrors without state metadata, repository privacy is
 unknown, so it treats those repositories as private by default.
@@ -383,7 +378,7 @@ https://git.sr.ht/~extencil
 ## Full Configuration Example
 
 ```toml
-workspace = ".aghm"
+workspace = ".agmh"
 mode = "full"
 dry_run = false
 verbose = 0
@@ -425,6 +420,13 @@ commit_message = "Add AGMH backup marker"
 # ssh_command = "ssh -i /home/user/.ssh/sourcehut_ed25519 -o IdentitiesOnly=yes"
 
 [[destinations]]
+url = "https://github.com/haltman-io-mirror"
+platform = "github"
+tokens = [{ env = "GITHUB_DEST_TOKEN", name = "github-destination" }]
+visibility = "mirror"
+push_mode = "mirror"
+
+[[destinations]]
 url = "https://gitlab.com/haltman-io"
 platform = "gitlab"
 tokens = [{ env = "GITLAB_TOKEN", name = "gitlab-primary" }]
@@ -454,13 +456,13 @@ Top-level options:
 | Key | Meaning |
 | --- | --- |
 | `mode` | Workflow mode: `full`, `local`, or `remote`. Default: `full`. |
-| `workspace` | Local state and logs directory. Default: `.aghm`. |
+| `workspace` | Local state and logs directory. Default: `.agmh`. |
 | `dry_run` | Plan actions without cloning, creating, or pushing. |
 | `verbose` | Default verbosity level. CLI `-v` can override it. |
 | `tui` | Use Rich console rendering when installed. |
 | `proxy` | Optional HTTP/HTTPS proxy URL. |
 | `insecure_tls` | Disable TLS certificate verification for API calls and Git HTTPS operations. |
-| `resume` | Reuse `.aghm/state.json` and skip completed steps. |
+| `resume` | Reuse `.agmh/state.json` and skip completed steps. |
 | `force` | Redo steps even if state says they are complete. |
 
 GitHub options:
@@ -482,7 +484,7 @@ Backup options:
 | `include_forks` | Include forked repositories. |
 | `include_private_for_authenticated_user` | When the token belongs to the target user, include private repositories. |
 | `lfs` | Run `git lfs fetch --all` after mirror updates. |
-| `marker_filename` | Marker file name. Default: `anti-gh-ms-hysteria.txt`. |
+| `marker_filename` | Marker file name. Default: `agmh.txt`. |
 | `push_mode` | `mirror`, `portable-mirror`, `all`, or `default`. |
 
 Retry options:
@@ -514,7 +516,7 @@ Destination options:
 | Key | Meaning |
 | --- | --- |
 | `url` | Destination account, group, org, or namespace URL. |
-| `platform` | `gitlab`, `forgejo`, `sourcehut`, or `bitbucket`. |
+| `platform` | `github`, `gitlab`, `forgejo`, `sourcehut`, or `bitbucket`. |
 | `api_base` | Optional API override for self-hosted instances. |
 | `owner` | Optional owner/namespace override. |
 | `tokens` | Destination API/Git tokens. |
@@ -534,6 +536,12 @@ GitHub:
 
 ```bash
 export GITHUB_TOKEN="..."
+```
+
+GitHub destination:
+
+```bash
+export GITHUB_DEST_TOKEN="..."
 ```
 
 GitLab:
@@ -591,7 +599,7 @@ Before pushing to destinations, AGMH writes a marker file into the default
 branch of the local mirror:
 
 ```txt
-anti-gh-ms-hysteria.txt
+agmh.txt
 ```
 
 The marker contains:
@@ -629,6 +637,7 @@ Recommended defaults:
 
 | Destination | Recommended push mode |
 | --- | --- |
+| GitHub | `mirror`, automatically translated to `portable-mirror` |
 | GitLab | `mirror` |
 | Codeberg/Forgejo | `mirror`, automatically translated to `portable-mirror` |
 | SourceHut | `mirror` over SSH, or `portable-mirror` if hidden refs cause rejection |
@@ -833,13 +842,13 @@ agmh run --config agmh.config.toml \
 AGMH stores resumable state here:
 
 ```txt
-.aghm/state.json
+.agmh/state.json
 ```
 
 Logs are stored here:
 
 ```txt
-.aghm/logs/
+.agmh/logs/
 ```
 
 Show a state summary:
@@ -897,6 +906,20 @@ agmh run \
   --source https://github.com/haltman-io/ \
   --destination https://codeberg.org/haltman \
   --destination-token forgejo:env:CODEBERG_TOKEN \
+  --verbose
+```
+
+Use GitHub as a destination:
+
+```bash
+export GITHUB_TOKEN="..."
+export GITHUB_DEST_TOKEN="..."
+
+agmh run \
+  --source https://github.com/haltman-io/ \
+  --destination https://github.com/haltman-io-mirror \
+  --destination-token github:env:GITHUB_DEST_TOKEN \
+  --github-token env:GITHUB_TOKEN \
   --verbose
 ```
 
@@ -1033,6 +1056,7 @@ Check the environment:
 
 ```bash
 printenv GITHUB_TOKEN
+printenv GITHUB_DEST_TOKEN
 printenv GITLAB_TOKEN
 printenv CODEBERG_TOKEN
 printenv SOURCEHUT_TOKEN
@@ -1068,12 +1092,12 @@ Use:
 agmh run --config agmh.config.toml --force
 ```
 
-or edit `.aghm/state.json` carefully.
+or edit `.agmh/state.json` carefully.
 
 ## Security Notes
 
 - Prefer environment variables for secrets.
-- Do not commit `.aghm/`, `backups/`, `aghm.config.toml`, `targets.txt`, `destinations.txt`, or private config files.
+- Do not commit `.agmh/`, `backups/`, `agmh.config.toml`, `targets.txt`, `destinations.txt`, or private config files.
 - Logs scrub configured token secrets.
 - If a token was ever printed before scrubbing existed, rotate it.
 - `--insecure` is useful for debugging or intercepting proxies, but it disables TLS verification.
@@ -1090,7 +1114,7 @@ src/anti_gh_ms_hysteria/
   http.py               API client, retries, proxy, TLS handling
   state.py              resumable state file
   sources/github.py     GitHub discovery adapter
-  destinations/         GitLab, Forgejo, Bitbucket, SourceHut adapters
+  destinations/         GitHub, GitLab, Forgejo, Bitbucket, SourceHut adapters
 tests/
   test_config_and_utils.py
 ```
@@ -1125,6 +1149,7 @@ PYTHONPATH=src python -m anti_gh_ms_hysteria run --help
 
 - Unlicense: https://unlicense.org/
 - GitHub personal access tokens: https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens
+- GitHub repositories REST API: https://docs.github.com/en/rest/repos/repos
 - GitHub REST API rate limits: https://docs.github.com/rest/rate-limit/rate-limit
 - GitLab personal access tokens: https://docs.gitlab.com/user/profile/personal_access_tokens/
 - GitLab Projects API: https://docs.gitlab.com/api/projects/

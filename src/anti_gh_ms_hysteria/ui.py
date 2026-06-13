@@ -53,7 +53,7 @@ def setup_logging(workspace: Path, verbose: int) -> tuple[logging.Logger, Path]:
     from .utils import utc_now_iso
 
     log_path = logs_dir / f"run-{utc_now_iso().replace(':', '-')}.log"
-    logger = logging.getLogger("anti_gh_ms_hysteria")
+    logger = logging.getLogger("agmh")
     logger.handlers.clear()
     logger.setLevel(logging.DEBUG)
     logger.propagate = False

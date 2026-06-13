@@ -1,4 +1,4 @@
-workspace = ".aghm"
+workspace = ".agmh"
 mode = "full"
 dry_run = false
 verbose = 0
@@ -31,9 +31,9 @@ rate_limit_sleep_seconds = 300
 wait_on_rate_limit = true
 
 [git]
-author_name = "anti-GH-MS-hysteria"
-author_email = "anti-gh-ms-hysteria@localhost"
-commit_message = "Add anti-GH-MS-hysteria backup marker"
+author_name = "agmh"
+author_email = "agmh@localhost"
+commit_message = "Add AGMH backup marker"
 # ssh_identity_file = "/home/user/.ssh/sourcehut_ed25519"
 # ssh_identities_only = true
 # ssh_batch_mode = false
@@ -44,6 +44,13 @@ commit_message = "Add anti-GH-MS-hysteria backup marker"
 url = "https://gitlab.com/extencil"
 platform = "gitlab"
 tokens = [{ env = "GITLAB_TOKEN", name = "gitlab-primary" }]
+visibility = "mirror"
+push_mode = "mirror"
+
+[[destinations]]
+url = "https://github.com/extencil-mirror"
+platform = "github"
+tokens = [{ env = "GITHUB_DEST_TOKEN", name = "github-destination" }]
 visibility = "mirror"
 push_mode = "mirror"
 
