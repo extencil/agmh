@@ -178,8 +178,8 @@ Destination support:
 Clone the repository:
 
 ```bash
-git clone https://github.com/<owner>/anti-GS-MS-hysteria.git
-cd anti-GS-MS-hysteria
+git clone https://github.com/haltman-io/agmh.git
+cd agmh
 ```
 
 Create a virtual environment:
