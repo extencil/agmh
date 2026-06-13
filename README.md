@@ -173,6 +173,25 @@ Destination support:
 - Optional: `git-lfs` if you enable `lfs = true`.
 - Optional: `ssh-agent` and SSH keys for SourceHut or SSH-based destinations.
 
+Ubuntu system packages:
+
+```bash
+sudo apt update
+sudo apt install -y python3 python3-venv python3-pip git ca-certificates openssh-client
+```
+
+Optional packages:
+
+```bash
+sudo apt install -y git-lfs curl
+```
+
+Notes:
+
+- `git-lfs` is only required when AGMH is configured with `lfs = true`.
+- `curl` is used only for the troubleshooting and proxy test commands shown in this README.
+- If your Ubuntu release provides Python older than 3.11, install Python 3.11 or newer before creating the virtual environment.
+
 ## Installation
 
 Clone the repository:
