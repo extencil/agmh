@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "agmh"
-version = "0.1.0"
+version = "0.2.0"
 description = "AGMH, a local GitHub backup and repository mirroring CLI."
 readme = "README.md"
 requires-python = ">=3.11"
