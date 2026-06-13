@@ -90,5 +90,5 @@ class GitLabSource(SourceAdapter):
             archived=bool(raw.get("archived", False)),
             fork=bool(raw.get("forked_from_project")),
             visibility=visibility,
+            updated_at=raw.get("last_activity_at") or raw.get("updated_at"),
         )
-

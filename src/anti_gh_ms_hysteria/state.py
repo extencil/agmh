@@ -44,6 +44,12 @@ class StateStore:
         entry["updated_at"] = utc_now_iso()
         self.save()
 
+    def mark_watch(self, key: str, status: str, **extra: Any) -> None:
+        entry = self.repo(key)
+        watch = entry.setdefault("watch", {})
+        watch.update({"status": status, "updated_at": utc_now_iso(), **extra})
+        self.save()
+
     def destination_status(self, key: str, destination_key: str, step: str) -> str | None:
         dest = self.repo(key).setdefault("destinations", {}).get(destination_key, {})
         return dest.get(step, {}).get("status")

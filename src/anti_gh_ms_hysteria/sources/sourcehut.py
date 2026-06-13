@@ -37,6 +37,7 @@ class SourceHutSource(SourceAdapter):
                 name
                 description
                 visibility
+                updated
                 repoPath
                 HEAD {
                   name
@@ -81,6 +82,7 @@ class SourceHutSource(SourceAdapter):
             archived=False,
             fork=False,
             visibility=visibility,
+            updated_at=raw.get("updated"),
         )
 
     def _graphql(self, query: str, variables: dict[str, Any]) -> Any:
@@ -104,4 +106,3 @@ def _branch_name(head: Any) -> str | None:
         return None
     text = str(name)
     return text.removeprefix("refs/heads/")
-

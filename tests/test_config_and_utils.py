@@ -37,6 +37,7 @@ from anti_gh_ms_hysteria.models import (
     RepoInfo,
     SourceConfig,
     TokenCredential,
+    WatchConfig,
 )
 from anti_gh_ms_hysteria.runner import MirrorRunner
 from anti_gh_ms_hysteria.sources import build_source
@@ -117,6 +118,28 @@ class FakeGitHubClient:
             {},
             201,
         )
+
+
+class FakeWatchSource:
+    def __init__(self, source: SourceConfig) -> None:
+        self.source = source
+        self.key = f"{source.platform}:{source.url}"
+
+
+class FakeWatchDiscovery:
+    def __init__(self, source: SourceConfig, repos: list[RepoInfo]) -> None:
+        self.sources = [FakeWatchSource(source)]
+        self.repos = repos
+        self.discovery_errors: list[tuple[str, str]] = []
+
+    def discover_one(self, source):
+        return self.repos
+
+    def current_token(self, repo: RepoInfo) -> TokenCredential | None:
+        return None
+
+    def secrets(self) -> list[str]:
+        return []
 
 
 def repo_info(name: str = "repo") -> RepoInfo:
@@ -249,7 +272,7 @@ class ConfigTests(unittest.TestCase):
     def test_build_config_from_args_loads_generic_sources_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            (root / "targets.txt").write_text(
+            (root / "sources.txt").write_text(
                 "\n".join(
                     [
                         "https://github.com/extencil",
@@ -259,7 +282,7 @@ class ConfigTests(unittest.TestCase):
                 encoding="utf-8",
             )
             config_path = root / "agmh.config.toml"
-            config_path.write_text('sources_file = "targets.txt"\n', encoding="utf-8")
+            config_path.write_text('sources_file = "sources.txt"\n', encoding="utf-8")
             args = build_parser().parse_args(["run", "--config", str(config_path)])
             cfg = build_config_from_args(args, include_destinations=True)
         self.assertEqual([source.platform for source in cfg.sources], ["github", "gitlab"])
@@ -363,6 +386,40 @@ class ConfigTests(unittest.TestCase):
         )
         self.assertEqual(cfg.mode, "remote")
         self.assertEqual(cfg.sources, [])
+
+    def test_watch_config_and_source_overrides_are_parsed(self) -> None:
+        cfg = config_from_dict(
+            {
+                "mode": "watching",
+                "watch": {
+                    "interval_seconds": 30,
+                    "action": "local",
+                    "initial_run": False,
+                    "once": True,
+                },
+                "sources": [
+                    {
+                        "url": "https://gitlab.com/group",
+                        "watch": False,
+                        "watch_interval_seconds": 10,
+                        "watch_action": "remote",
+                    }
+                ],
+            },
+            Path.cwd(),
+        )
+        self.assertEqual(cfg.mode, "watching")
+        self.assertEqual(cfg.watch.interval_seconds, 30)
+        self.assertEqual(cfg.watch.action, "local")
+        self.assertFalse(cfg.watch.initial_run)
+        self.assertTrue(cfg.watch.once)
+        self.assertFalse(cfg.sources[0].watch)
+        self.assertEqual(cfg.sources[0].watch_interval_seconds, 10)
+        self.assertEqual(cfg.sources[0].watch_action, "remote")
+
+    def test_watch_interval_must_be_positive(self) -> None:
+        with self.assertRaises(ConfigError):
+            config_from_dict({"watch": {"interval_seconds": 0}}, Path.cwd())
 
 
 class StateTests(unittest.TestCase):
@@ -782,6 +839,113 @@ class RunnerTests(unittest.TestCase):
         args = build_parser().parse_args(["run", "--destination-visibility", "public"])
         with self.assertRaises(ConfigError):
             build_config_from_args(args, include_destinations=True)
+
+    def test_watching_processes_first_seen_repo_with_source_action_override(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            source = SourceConfig(
+                url="https://github.com/owner",
+                platform="github",
+                owner="owner",
+                watch_action="local",
+                watch_interval_seconds=7,
+            )
+            repo = RepoInfo(**{**repo_info().__dict__, "updated_at": "2026-06-13T10:00:00Z"})
+            cfg = AppConfig(
+                mode="watching",
+                workspace=Path(tmp) / ".agmh",
+                watch=WatchConfig(once=True, action="full", interval_seconds=60),
+            )
+            runner = MirrorRunner(cfg, DummyUI())
+            runner.source = FakeWatchDiscovery(source, [repo])
+            processed = []
+
+            def record_process(repo: RepoInfo, force_workflow: bool = False, workflow_mode: str | None = None):
+                processed.append((repo.key, force_workflow, workflow_mode))
+                return True
+
+            runner._process_repo = record_process
+            result = runner.run()
+
+        self.assertEqual(result, 0)
+        self.assertEqual(processed, [("github:owner/repo", True, "local")])
+
+    def test_watching_initial_run_false_marks_without_processing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            source = SourceConfig(url="https://github.com/owner", platform="github", owner="owner")
+            repo = RepoInfo(**{**repo_info().__dict__, "updated_at": "2026-06-13T10:00:00Z"})
+            cfg = AppConfig(
+                mode="watching",
+                workspace=Path(tmp) / ".agmh",
+                watch=WatchConfig(once=True, initial_run=False),
+            )
+            runner = MirrorRunner(cfg, DummyUI())
+            runner.source = FakeWatchDiscovery(source, [repo])
+            processed = []
+
+            def record_process(repo: RepoInfo, force_workflow: bool = False, workflow_mode: str | None = None):
+                processed.append(repo.key)
+                return True
+
+            runner._process_repo = record_process
+            result = runner.run()
+            watch_state = runner.state.repo(repo.key)["watch"]
+
+        self.assertEqual(result, 0)
+        self.assertEqual(processed, [])
+        self.assertEqual(watch_state["status"], "seen")
+
+    def test_watching_skips_unchanged_repo_after_success(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            source = SourceConfig(url="https://github.com/owner", platform="github", owner="owner")
+            repo = RepoInfo(**{**repo_info().__dict__, "updated_at": "2026-06-13T10:00:00Z"})
+            cfg = AppConfig(
+                mode="watching",
+                workspace=Path(tmp) / ".agmh",
+                watch=WatchConfig(once=True, action="local"),
+            )
+            runner = MirrorRunner(cfg, DummyUI())
+            fake_source = FakeWatchDiscovery(source, [repo])
+            runner.source = fake_source
+            processed = []
+
+            def record_process(repo: RepoInfo, force_workflow: bool = False, workflow_mode: str | None = None):
+                processed.append(repo.updated_at)
+                return True
+
+            runner._process_repo = record_process
+            first = runner.run()
+            processed.clear()
+            second = runner.run()
+
+        self.assertEqual(first, 0)
+        self.assertEqual(second, 0)
+        self.assertEqual(processed, [])
+
+    def test_watching_processes_repo_when_fingerprint_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            source = SourceConfig(url="https://github.com/owner", platform="github", owner="owner")
+            first_repo = RepoInfo(**{**repo_info().__dict__, "updated_at": "2026-06-13T10:00:00Z"})
+            second_repo = RepoInfo(**{**repo_info().__dict__, "updated_at": "2026-06-13T10:05:00Z"})
+            cfg = AppConfig(
+                mode="watching",
+                workspace=Path(tmp) / ".agmh",
+                watch=WatchConfig(once=True, action="local"),
+            )
+            runner = MirrorRunner(cfg, DummyUI())
+            fake_source = FakeWatchDiscovery(source, [first_repo])
+            runner.source = fake_source
+            processed = []
+
+            def record_process(repo: RepoInfo, force_workflow: bool = False, workflow_mode: str | None = None):
+                processed.append(repo.updated_at)
+                return True
+
+            runner._process_repo = record_process
+            runner.run()
+            fake_source.repos = [second_repo]
+            runner.run()
+
+        self.assertEqual(processed, ["2026-06-13T10:00:00Z", "2026-06-13T10:05:00Z"])
 
 
 if __name__ == "__main__":

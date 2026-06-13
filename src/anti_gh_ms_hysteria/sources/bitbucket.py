@@ -63,6 +63,7 @@ class BitbucketSource(SourceAdapter):
             archived=bool(raw.get("archived", False)),
             fork=bool(raw.get("parent")),
             visibility=visibility,
+            updated_at=raw.get("updated_on"),
         )
 
 
@@ -77,4 +78,3 @@ def _clone_urls(clones: list[dict]) -> tuple[str | None, str | None]:
         elif name == "ssh" and href:
             ssh_url = str(href)
     return https_url, ssh_url
-

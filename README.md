@@ -248,11 +248,11 @@ Create a starter config:
 cp config.example.toml agmh.config.toml
 ```
 
-Create `targets.txt` from the public-safe example:
+Create `sources.txt` from the public-safe example:
 
 ```bash
-cp targets.example.txt targets.txt
-$EDITOR targets.txt
+cp sources.example.txt sources.txt
+$EDITOR sources.txt
 ```
 
 If you prefer to keep destinations in a separate file instead of inline TOML,
@@ -351,10 +351,73 @@ creates destination repositories as private regardless of source visibility. If
 a destination repository already exists, AGMH uses the existing repository as-is.
 The same override is available with `agmh run --mode remote`.
 
+Watching mode:
+
+```bash
+agmh watching --config agmh.config.toml --verbose
+```
+
+Equivalent:
+
+```bash
+agmh run --config agmh.config.toml --mode watching --verbose
+```
+
+Watching mode runs until interrupted. It polls enabled sources, compares the
+current source metadata with `.agmh/state.json`, and runs the configured action
+only for first-seen or changed repositories. The default action is `full`.
+The change fingerprint uses source API update fields such as GitHub `pushed_at`,
+GitLab `last_activity_at`, Forgejo `updated_at`, Bitbucket `updated_on`, and
+SourceHut `updated`. GitLab documents that `last_activity_at` can lag by up to
+one hour, so GitLab polling is eventually consistent rather than instant.
+
+Watching actions:
+
+| Action | Behavior |
+| --- | --- |
+| `full` | Clone/update the local mirror, ensure the marker, create destinations, and push. |
+| `local` | Clone/update the local mirror only. |
+| `remote` | Push an existing local mirror for the changed repository. If the local mirror is missing, the action fails for that repository. |
+
+Configure polling globally:
+
+```toml
+[watch]
+interval_seconds = 300
+action = "full"       # full, local, or remote
+initial_run = true    # process repositories the first time they are seen
+once = false          # useful for tests or supervised one-shot runs
+```
+
+Override polling per source:
+
+```toml
+[[sources]]
+url = "https://gitlab.com/haltman-io"
+platform = "gitlab"
+tokens = [{ env = "GITLAB_SOURCE_TOKEN" }]
+watch = true
+watch_interval_seconds = 120
+watch_action = "local"
+```
+
+CLI overrides:
+
+```bash
+agmh watching \
+  --config agmh.config.toml \
+  --watch-interval 120 \
+  --watch-action full
+```
+
+Use `--no-watch-initial-run` when you want AGMH to record the current state
+without processing existing repositories on the first polling cycle. Use
+`--watch-once` to run one polling cycle and exit.
+
 You can also set the mode in TOML:
 
 ```toml
-mode = "full"   # full, local, or remote
+mode = "full"   # full, local, remote, or watching
 ```
 
 ## Input Files
@@ -399,7 +462,7 @@ dry_run = false
 verbose = 0
 tui = true
 insecure_tls = false
-sources_file = "targets.txt"
+sources_file = "sources.txt"
 
 [github]
 tokens = [
@@ -407,11 +470,19 @@ tokens = [
   # { env = "GITHUB_TOKEN_2", name = "github-secondary" },
 ]
 
+[watch]
+interval_seconds = 300
+action = "full"
+initial_run = true
+once = false
+
 # Inline sources are useful when a non-GitHub source needs a token or api_base.
 [[sources]]
 url = "https://gitlab.com/haltman-io"
 platform = "gitlab"
 tokens = [{ env = "GITLAB_SOURCE_TOKEN", name = "gitlab-source" }]
+watch_interval_seconds = 120
+watch_action = "local"
 
 [backup]
 local_dir = "backups"
@@ -476,7 +547,7 @@ Top-level options:
 
 | Key | Meaning |
 | --- | --- |
-| `mode` | Workflow mode: `full`, `local`, or `remote`. Default: `full`. |
+| `mode` | Workflow mode: `full`, `local`, `remote`, or `watching`. Default: `full`. |
 | `workspace` | Local state and logs directory. Default: `.agmh`. |
 | `dry_run` | Plan actions without cloning, creating, or pushing. |
 | `verbose` | Default verbosity level. CLI `-v` can override it. |
@@ -505,6 +576,18 @@ Source options:
 | `api_base` | Optional API override for self-hosted or enterprise instances. |
 | `owner` | Optional owner/namespace/workspace override. |
 | `tokens` | Source API and HTTPS clone tokens. Use `env` instead of hardcoding secrets. |
+| `watch` | Enable or disable this source in watching mode. Default: `true`. |
+| `watch_interval_seconds` | Per-source polling interval override. |
+| `watch_action` | Per-source action override: `full`, `local`, or `remote`. |
+
+Watch options:
+
+| Key | Meaning |
+| --- | --- |
+| `interval_seconds` | Default polling interval for sources in watching mode. |
+| `action` | Default action for changed repositories: `full`, `local`, or `remote`. |
+| `initial_run` | Process repositories the first time they are seen. If `false`, AGMH records current fingerprints and waits for later changes. |
+| `once` | Run one polling cycle and exit. Mainly useful for tests, cron-like runs, or supervised debugging. |
 
 Backup options:
 
@@ -514,7 +597,7 @@ Backup options:
 | `clone_protocol` | `https` or `ssh` for source clone URLs. |
 | `include_archived` | Include archived repositories. |
 | `include_forks` | Include forked repositories. |
-| `include_private_for_authenticated_user` | When the token belongs to the target user, include private repositories. |
+| `include_private_for_authenticated_user` | When the token belongs to the source user, include private repositories. |
 | `lfs` | Run `git lfs fetch --all` after mirror updates. |
 | `marker_filename` | Marker file name. Default: `agmh.txt`. |
 | `push_mode` | `mirror`, `portable-mirror`, `all`, or `default`. |
@@ -912,13 +995,13 @@ agmh run --config agmh.config.toml --no-resume
 Discover only:
 
 ```bash
-agmh discover --sources targets.txt
+agmh discover --sources sources.txt
 ```
 
 Write discovery output to JSON:
 
 ```bash
-agmh discover --sources targets.txt --output discovered-repos.json
+agmh discover --sources sources.txt --output discovered-repos.json
 ```
 
 Back up one GitHub org to GitLab:
@@ -986,6 +1069,16 @@ agmh run \
   --destination https://github.com/haltman-io-mirror \
   --destination-token github:env:GITHUB_DEST_TOKEN \
   --github-token env:GITHUB_TOKEN \
+  --verbose
+```
+
+Watch sources and mirror updates:
+
+```bash
+agmh watching \
+  --config agmh.config.toml \
+  --watch-interval 300 \
+  --watch-action full \
   --verbose
 ```
 
@@ -1163,7 +1256,7 @@ or edit `.agmh/state.json` carefully.
 ## Security Notes
 
 - Prefer environment variables for secrets.
-- Do not commit `.agmh/`, `backups/`, `agmh.config.toml`, `targets.txt`, `destinations.txt`, or private config files.
+- Do not commit `.agmh/`, `backups/`, `agmh.config.toml`, `sources.txt`, `destinations.txt`, or private config files.
 - Logs scrub configured token secrets.
 - If a token was ever printed before scrubbing existed, rotate it.
 - `--insecure` is useful for debugging or intercepting proxies, but it disables TLS verification.

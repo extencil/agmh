@@ -4,7 +4,7 @@ dry_run = false
 verbose = 0
 tui = true
 insecure_tls = false
-sources_file = "targets.txt"
+sources_file = "sources.txt"
 
 [github]
 # Optional defaults for GitHub source URLs from sources_file or [github].profiles.
@@ -13,11 +13,19 @@ tokens = [
   # { env = "GITHUB_TOKEN_2", name = "github-secondary" },
 ]
 
+[watch]
+interval_seconds = 300
+action = "full"
+initial_run = true
+once = false
+
 # Use inline sources when a non-GitHub source needs its own token or API base.
 # [[sources]]
 # url = "https://gitlab.com/extencil"
 # platform = "gitlab"
 # tokens = [{ env = "GITLAB_SOURCE_TOKEN", name = "gitlab-source" }]
+# watch_interval_seconds = 120
+# watch_action = "local"
 #
 # [[sources]]
 # url = "https://codeberg.org/extencil"

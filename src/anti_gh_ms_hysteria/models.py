@@ -7,7 +7,8 @@ from typing import Literal
 
 VisibilityMode = Literal["mirror", "public", "private", "unlisted"]
 PushMode = Literal["mirror", "portable-mirror", "all", "default"]
-WorkflowMode = Literal["full", "local", "remote"]
+WatchAction = Literal["full", "local", "remote"]
+WorkflowMode = Literal["full", "local", "remote", "watching"]
 
 
 @dataclass(frozen=True)
@@ -36,6 +37,7 @@ class RepoInfo:
     archived: bool = False
     fork: bool = False
     visibility: str | None = None
+    updated_at: str | None = None
 
     @property
     def key(self) -> str:
@@ -91,6 +93,17 @@ class SourceConfig:
     api_base: str | None = None
     owner: str | None = None
     tokens: list[TokenCredential] = field(default_factory=list)
+    watch: bool = True
+    watch_interval_seconds: int | None = None
+    watch_action: WatchAction | None = None
+
+
+@dataclass
+class WatchConfig:
+    interval_seconds: int = 300
+    action: WatchAction = "full"
+    initial_run: bool = True
+    once: bool = False
 
 
 @dataclass
@@ -125,6 +138,7 @@ class AppConfig:
     backup: BackupConfig = field(default_factory=BackupConfig)
     retry: RetryConfig = field(default_factory=RetryConfig)
     git: GitConfig = field(default_factory=GitConfig)
+    watch: WatchConfig = field(default_factory=WatchConfig)
     resume: bool = True
     force: bool = False
 

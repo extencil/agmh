@@ -43,6 +43,8 @@ class MirrorRunner:
     def run(self) -> int:
         if self.cfg.mode == "remote":
             return self._run_remote_mirror()
+        if self.cfg.mode == "watching":
+            return self._run_watching()
 
         repos = self.discover()
         self.ui.info(f"Discovered {len(repos)} source repositories")
@@ -85,6 +87,117 @@ class MirrorRunner:
         self.ui.success("Completed remote mirror workflow")
         return 0
 
+    def _run_watching(self) -> int:
+        enabled_sources = [source for source in self.source.sources if source.source.watch]
+        if not enabled_sources:
+            self.ui.error("Watching mode has no enabled sources")
+            return 1
+
+        self.ui.info(
+            f"Starting watching workflow for {len(enabled_sources)} source(s); "
+            f"default interval is {self.cfg.watch.interval_seconds}s"
+        )
+        next_poll = {source.key: 0.0 for source in enabled_sources}
+        failures = 0
+        try:
+            while True:
+                now = time.monotonic()
+                polled = False
+                for source in enabled_sources:
+                    if now < next_poll[source.key]:
+                        continue
+                    polled = True
+                    failures += self._watch_source(source)
+                    next_poll[source.key] = time.monotonic() + _source_watch_interval(
+                        source.source.watch_interval_seconds,
+                        self.cfg.watch.interval_seconds,
+                    )
+                if self.cfg.watch.once:
+                    return 1 if failures else 0
+                sleep_for = _watch_sleep_seconds(next_poll)
+                if polled:
+                    self.ui.debug(f"Watching idle for {sleep_for:.1f}s")
+                time.sleep(sleep_for)
+        except KeyboardInterrupt:
+            self.ui.warning("Watching workflow stopped by keyboard interrupt")
+            return 130
+
+    def _watch_source(self, source) -> int:
+        action = source.source.watch_action or self.cfg.watch.action
+        interval = _source_watch_interval(source.source.watch_interval_seconds, self.cfg.watch.interval_seconds)
+        self.ui.info(f"Polling {source.key}; action={action}, interval={interval}s")
+        failures = 0
+        discovery_errors_before = len(self.source.discovery_errors)
+        repos = self.source.discover_one(source)
+        if len(self.source.discovery_errors) > discovery_errors_before:
+            failures += 1
+        for repo in repos:
+            should_process, reason, fingerprint = self._watch_decision(repo)
+            if not should_process:
+                continue
+            self.ui.info(f"Watching detected {reason} for {repo.full_name}; running {action} workflow")
+            ok = self._process_watched_repo(repo, action)
+            if ok:
+                self.state.mark_watch(
+                    repo.key,
+                    "processed",
+                    fingerprint=fingerprint,
+                    source_updated_at=repo.updated_at,
+                    action=action,
+                    reason=reason,
+                    last_processed_at=utc_now_iso(),
+                )
+            else:
+                failures += 1
+                self.state.mark_watch(
+                    repo.key,
+                    "failed",
+                    pending_fingerprint=fingerprint,
+                    source_updated_at=repo.updated_at,
+                    action=action,
+                    reason=reason,
+                )
+        return failures
+
+    def _watch_decision(self, repo: RepoInfo) -> tuple[bool, str, str]:
+        fingerprint = _watch_fingerprint(repo)
+        entry = self.state.repo(repo.key)
+        watch = entry.get("watch", {})
+        previous = watch.get("fingerprint")
+        if not previous:
+            if self.cfg.watch.initial_run:
+                return True, "first-seen repository", fingerprint
+            self.state.mark_watch(
+                repo.key,
+                "seen",
+                fingerprint=fingerprint,
+                source_updated_at=repo.updated_at,
+                last_seen_at=utc_now_iso(),
+                action="none",
+                reason="initial-run-disabled",
+            )
+            return False, "unchanged", fingerprint
+        if previous != fingerprint:
+            return True, "source update", fingerprint
+        self.state.mark_watch(
+            repo.key,
+            "unchanged",
+            fingerprint=fingerprint,
+            source_updated_at=repo.updated_at,
+            last_seen_at=utc_now_iso(),
+        )
+        return False, "unchanged", fingerprint
+
+    def _process_watched_repo(self, repo: RepoInfo, action: str) -> bool:
+        if action in {"full", "local"}:
+            return self._process_repo(repo, force_workflow=True, workflow_mode=action)
+        mirror_path = self.git.mirror_path(repo)
+        if not mirror_path.exists():
+            self.ui.error(f"Remote watch action needs an existing local mirror for {repo.full_name}: {mirror_path}")
+            return False
+        mirror = LocalMirror(repo=repo, path=mirror_path, downloaded_at=utc_now_iso())
+        return self._process_local_mirror(mirror, force_workflow=True)
+
     def write_discovery_json(self, path: Path | None = None) -> list[RepoInfo]:
         repos = self.discover()
         payload = [
@@ -97,6 +210,7 @@ class MirrorRunner:
                 "ssh_url": repo.ssh_url,
                 "default_branch": repo.default_branch,
                 "web_url": repo.web_url,
+                "updated_at": repo.updated_at,
             }
             for repo in repos
         ]
@@ -108,7 +222,13 @@ class MirrorRunner:
             print(text)
         return repos
 
-    def _process_repo(self, repo: RepoInfo) -> bool:
+    def _process_repo(
+        self,
+        repo: RepoInfo,
+        force_workflow: bool = False,
+        workflow_mode: str | None = None,
+    ) -> bool:
+        workflow_mode = workflow_mode or self.cfg.mode
         key = repo.key
         self.state.mark_repo_metadata(
             key,
@@ -117,13 +237,14 @@ class MirrorRunner:
             private=repo.private,
             default_branch=repo.default_branch,
             visibility=repo.visibility,
+            source_updated_at=repo.updated_at,
         )
         mirror_path = self.git.mirror_path(repo)
         downloaded_at = utc_now_iso()
         branch = repo.default_branch or "main"
 
         try:
-            if self._should_skip_step(key, "clone") and mirror_path.exists():
+            if self._should_skip_step(key, "clone", force_workflow) and mirror_path.exists():
                 self.ui.info(f"Skipping clone for {repo.full_name}; state already marks it done")
                 clone_step = self.state.repo(key).get("steps", {}).get("clone", {})
                 downloaded_at = clone_step.get("downloaded_at", downloaded_at)
@@ -136,13 +257,13 @@ class MirrorRunner:
             self.ui.error(f"Clone/update failed for {repo.full_name}: {exc}")
             return False
 
-        if self.cfg.mode == "local":
+        if workflow_mode == "local":
             self.ui.info(f"Local mirror mode: skipping marker and destinations for {repo.full_name}")
             return True
 
-        return self._finish_repo_workflow(repo, mirror_path, downloaded_at, branch)
+        return self._finish_repo_workflow(repo, mirror_path, downloaded_at, branch, force_workflow)
 
-    def _process_local_mirror(self, mirror: LocalMirror) -> bool:
+    def _process_local_mirror(self, mirror: LocalMirror, force_workflow: bool = False) -> bool:
         repo = mirror.repo
         key = repo.key
         mirror_path = mirror.path
@@ -154,6 +275,7 @@ class MirrorRunner:
             private=repo.private,
             default_branch=repo.default_branch,
             visibility=repo.visibility,
+            source_updated_at=repo.updated_at,
             privacy_known=mirror.privacy_known,
         )
         if not self.state.is_done(key, "clone"):
@@ -166,7 +288,7 @@ class MirrorRunner:
             self.ui.warning(
                 f"Privacy is unknown for scanned local mirror {repo.full_name}; treating it as private"
             )
-        return self._finish_repo_workflow(repo, mirror_path, mirror.downloaded_at, branch)
+        return self._finish_repo_workflow(repo, mirror_path, mirror.downloaded_at, branch, force_workflow)
 
     def _finish_repo_workflow(
         self,
@@ -174,10 +296,11 @@ class MirrorRunner:
         mirror_path: Path,
         downloaded_at: str,
         branch: str,
+        force_workflow: bool = False,
     ) -> bool:
         key = repo.key
         try:
-            if self._should_skip_step(key, "marker"):
+            if self._should_skip_step(key, "marker", force_workflow):
                 self.ui.info(f"Skipping marker for {repo.full_name}; state already marks it done")
                 marker_step = self.state.repo(key).get("steps", {}).get("marker", {})
                 branch = marker_step.get("branch", branch)
@@ -191,7 +314,7 @@ class MirrorRunner:
 
         destination_failures = 0
         for destination in self.destinations:
-            if not self._process_destination(repo, mirror_path, branch, destination):
+            if not self._process_destination(repo, mirror_path, branch, destination, force_workflow):
                 destination_failures += 1
         return destination_failures == 0
 
@@ -223,6 +346,7 @@ class MirrorRunner:
                 default_branch=entry.get("default_branch") or None,
                 private=bool(entry.get("private", False)),
                 visibility=entry.get("visibility") or None,
+                updated_at=entry.get("source_updated_at") or None,
             )
             path = Path(str(clone_step.get("path") or self.git.mirror_path(repo)))
             downloaded_at = str(clone_step.get("downloaded_at") or entry.get("updated_at") or utc_now_iso())
@@ -254,6 +378,7 @@ class MirrorRunner:
                         default_branch=_default_branch_from_head(mirror_path),
                         private=True,
                         visibility="private",
+                        updated_at=None,
                     )
                     mirrors.append(
                         LocalMirror(
@@ -271,6 +396,7 @@ class MirrorRunner:
         mirror_path: Path,
         branch: str,
         destination: DestinationAdapter,
+        force_workflow: bool = False,
     ) -> bool:
         key = repo.key
         dest_key = destination.key
@@ -309,7 +435,7 @@ class MirrorRunner:
             return False
 
         try:
-            if self._should_skip_destination(key, dest_key, "push"):
+            if self._should_skip_destination(key, dest_key, "push", force_workflow):
                 self.ui.info(f"Skipping push for {repo.full_name} to {dest_key}; state already marks it done")
             else:
                 self._push_with_rotation(repo, mirror_path, branch, destination)
@@ -366,13 +492,20 @@ class MirrorRunner:
                     raise last_error
                 raise RuntimeError(f"Push failed for {repo.full_name} to {destination.key}")
 
-    def _should_skip_step(self, key: str, step: str) -> bool:
-        return self.cfg.resume and not self.cfg.force and self.state.is_done(key, step)
+    def _should_skip_step(self, key: str, step: str, force_workflow: bool = False) -> bool:
+        return self.cfg.resume and not self.cfg.force and not force_workflow and self.state.is_done(key, step)
 
-    def _should_skip_destination(self, key: str, destination_key: str, step: str) -> bool:
+    def _should_skip_destination(
+        self,
+        key: str,
+        destination_key: str,
+        step: str,
+        force_workflow: bool = False,
+    ) -> bool:
         return (
             self.cfg.resume
             and not self.cfg.force
+            and not force_workflow
             and self.state.destination_status(key, destination_key, step) == "done"
         )
 
@@ -406,6 +539,28 @@ def _looks_like_transient_git_network_error(text: str) -> bool:
         "curl 56",
     ]
     return any(pattern in text for pattern in patterns)
+
+
+def _watch_fingerprint(repo: RepoInfo) -> str:
+    payload = {
+        "clone_url": repo.clone_url,
+        "default_branch": repo.default_branch,
+        "private": repo.private,
+        "ssh_url": repo.ssh_url,
+        "updated_at": repo.updated_at,
+        "visibility": repo.visibility,
+    }
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"))
+
+
+def _source_watch_interval(source_interval: int | None, default_interval: int) -> int:
+    return max(1, int(source_interval or default_interval))
+
+
+def _watch_sleep_seconds(next_poll: dict[str, float]) -> float:
+    if not next_poll:
+        return 1.0
+    return max(1.0, min(next_poll.values()) - time.monotonic())
 
 
 def _full_name_from_key(key: str) -> str:

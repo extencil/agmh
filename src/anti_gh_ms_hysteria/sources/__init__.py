@@ -38,15 +38,20 @@ class SourceDiscovery:
         self.repo_sources = {}
         repos: dict[str, RepoInfo] = {}
         for source in self.sources:
-            try:
-                for repo in source.discover():
-                    key = repo.key.lower()
-                    repos[key] = repo
-                    self.repo_sources[key] = source
-            except Exception as exc:
-                self.discovery_errors.append((source.source.url, str(exc)))
-                self.ui.error(f"Failed to discover {source.source.url}: {exc}")
+            for repo in self.discover_one(source):
+                repos[repo.key.lower()] = repo
         return sorted(repos.values(), key=lambda item: (item.source_platform, item.full_name.lower()))
+
+    def discover_one(self, source: SourceAdapter) -> list[RepoInfo]:
+        try:
+            repos = source.discover()
+        except Exception as exc:
+            self.discovery_errors.append((source.source.url, str(exc)))
+            self.ui.error(f"Failed to discover {source.source.url}: {exc}")
+            return []
+        for repo in repos:
+            self.repo_sources[repo.key.lower()] = source
+        return repos
 
     def current_token(self, repo: RepoInfo) -> TokenCredential | None:
         source = self.repo_sources.get(repo.key.lower())

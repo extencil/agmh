@@ -1,5 +1,5 @@
 # One source profile, organization, group, namespace, or workspace URL per line.
-# Copy this file to targets.txt and edit it for your migration.
+# Copy this file to sources.txt and edit it for your migration.
 
 https://github.com/example-user
 https://github.com/example-org

@@ -26,7 +26,12 @@ mode = "full"
 dry_run = false
 verbose = 0
 tui = true
-sources_file = "targets.txt"
+sources_file = "sources.txt"
+
+[watch]
+interval_seconds = 300
+action = "full"
+initial_run = true
 
 [github]
 tokens = [{ env = "GITHUB_TOKEN", name = "github-primary" }]
@@ -64,7 +69,17 @@ commit_message = "Add AGMH backup marker"
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     raw = list(sys.argv[1:] if argv is None else argv)
-    commands = {"run", "local-mirror", "remote-mirror", "discover", "init-config", "state", "-h", "--help"}
+    commands = {
+        "run",
+        "local-mirror",
+        "remote-mirror",
+        "watching",
+        "discover",
+        "init-config",
+        "state",
+        "-h",
+        "--help",
+    }
     if not raw or raw[0] not in commands:
         raw = ["run", *raw]
     args = parser.parse_args(raw)
@@ -94,6 +109,10 @@ def build_parser() -> argparse.ArgumentParser:
     add_runtime_args(remote, mode=False, destination_visibility=True)
     remote.set_defaults(handler=run_command, workflow_mode="remote")
 
+    watching = sub.add_parser("watching", help="poll sources forever and process repository updates")
+    add_runtime_args(watching, mode=False, destination_visibility=True)
+    watching.set_defaults(handler=run_command, workflow_mode="watching")
+
     discover = sub.add_parser("discover", help="list accessible source repositories")
     add_runtime_args(discover, destinations=False, mode=False)
     discover.add_argument("--output", type=Path, help="write JSON discovery output to this file")
@@ -121,8 +140,8 @@ def add_runtime_args(
     if mode:
         parser.add_argument(
             "--mode",
-            choices=["full", "local", "remote"],
-            help="workflow mode: full clones and pushes, local only clones, remote only pushes local mirrors",
+            choices=["full", "local", "remote", "watching"],
+            help="workflow mode: full clones and pushes, local only clones, remote only pushes local mirrors, watching polls sources",
         )
     parser.add_argument("--sources", type=Path, help="text file with one source profile URL per line")
     parser.add_argument("--source", action="append", default=[], help="source profile URL; repeatable")
@@ -158,6 +177,18 @@ def add_runtime_args(
     parser.add_argument("--no-resume", action="store_true", help="ignore completed state entries")
     parser.add_argument("--force", action="store_true", help="redo steps even if state says they are done")
     parser.add_argument("--lfs", action="store_true", help="run git lfs fetch --all after mirror updates")
+    parser.add_argument("--watch-interval", type=int, help="default watching poll interval in seconds")
+    parser.add_argument(
+        "--watch-action",
+        choices=["full", "local", "remote"],
+        help="watching action when a source repository changes",
+    )
+    parser.add_argument(
+        "--no-watch-initial-run",
+        action="store_true",
+        help="in watching mode, record first-seen repositories without processing them",
+    )
+    parser.add_argument("--watch-once", action="store_true", help="run one watching poll cycle and exit")
     parser.add_argument("-v", "--verbose", action="count", default=0, help="increase log verbosity")
     parser.add_argument("--exclude-archived", action="store_true", help="skip archived source repositories")
     parser.add_argument("--exclude-forks", action="store_true", help="skip forked source repositories")
@@ -282,6 +313,16 @@ def build_config_from_args(args: argparse.Namespace, include_destinations: bool)
         cfg.force = True
     if args.lfs:
         cfg.backup.lfs = True
+    if args.watch_interval is not None:
+        if args.watch_interval <= 0:
+            raise ConfigError("--watch-interval must be a positive integer")
+        cfg.watch.interval_seconds = args.watch_interval
+    if args.watch_action:
+        cfg.watch.action = args.watch_action
+    if args.no_watch_initial_run:
+        cfg.watch.initial_run = False
+    if args.watch_once:
+        cfg.watch.once = True
     if args.verbose:
         cfg.verbose = max(cfg.verbose, args.verbose)
     if args.exclude_archived:
@@ -320,8 +361,8 @@ def build_config_from_args(args: argparse.Namespace, include_destinations: bool)
         cfg.destinations.extend(destination_from_url(url) for url in args.destination)
         destination_visibility = getattr(args, "destination_visibility", None)
         if destination_visibility:
-            if cfg.mode != "remote":
-                raise ConfigError("--destination-visibility is only valid in remote mirror mode")
+            if cfg.mode not in {"remote", "watching"}:
+                raise ConfigError("--destination-visibility is only valid in remote mirror or watching mode")
             for dest in cfg.destinations:
                 dest.visibility = destination_visibility
         destination_tokens = [parse_destination_token(value) for value in args.destination_token]

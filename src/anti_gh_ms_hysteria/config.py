@@ -14,6 +14,7 @@ from .models import (
     RetryConfig,
     SourceConfig,
     TokenCredential,
+    WatchConfig,
 )
 from .utils import infer_platform, parse_owner_from_profile_url, read_lines_file, resolve_secret
 
@@ -123,6 +124,17 @@ def config_from_dict(
         wait_on_rate_limit=bool(retry.get("wait_on_rate_limit", cfg.retry.wait_on_rate_limit)),
     )
 
+    watch = data.get("watch", {})
+    cfg.watch = WatchConfig(
+        interval_seconds=_positive_int(
+            watch.get("interval_seconds", cfg.watch.interval_seconds),
+            "watch.interval_seconds",
+        ),
+        action=_watch_action(watch.get("action", cfg.watch.action), "watch.action"),
+        initial_run=bool(watch.get("initial_run", cfg.watch.initial_run)),
+        once=bool(watch.get("once", cfg.watch.once)),
+    )
+
     git = data.get("git", {})
     cfg.git = GitConfig(
         author_name=str(git.get("author_name", cfg.git.author_name)),
@@ -220,6 +232,16 @@ def _source_from_dict(raw: dict[str, Any], parse_tokens: bool = True) -> SourceC
         api_base=raw.get("api_base"),
         owner=owner,
         tokens=_token_list(raw.get("tokens", []), f"source {url} tokens") if parse_tokens else [],
+        watch=bool(raw.get("watch", True)),
+        watch_interval_seconds=_optional_positive_int(
+            raw.get("watch_interval_seconds", raw.get("poll_interval_seconds")),
+            f"source {url} watch_interval_seconds",
+        ),
+        watch_action=(
+            _watch_action(raw.get("watch_action"), f"source {url} watch_action")
+            if raw.get("watch_action") is not None
+            else None
+        ),
     )
 
 
@@ -369,11 +391,47 @@ def _workflow_mode(value: Any) -> str:
         "remote-only": "remote",
         "remote_mirror": "remote",
         "remote-mirror": "remote",
+        "watch": "watching",
+        "watching-mode": "watching",
     }
     mode = aliases.get(mode, mode)
-    if mode not in {"full", "local", "remote"}:
-        raise ConfigError("mode must be one of: full, local, remote")
+    if mode not in {"full", "local", "remote", "watching"}:
+        raise ConfigError("mode must be one of: full, local, remote, watching")
     return mode
+
+
+def _watch_action(value: Any, field_name: str) -> str:
+    action = str(value or "full").strip().lower()
+    aliases = {
+        "all": "full",
+        "default": "full",
+        "local-only": "local",
+        "local_mirror": "local",
+        "local-mirror": "local",
+        "remote-only": "remote",
+        "remote_mirror": "remote",
+        "remote-mirror": "remote",
+    }
+    action = aliases.get(action, action)
+    if action not in {"full", "local", "remote"}:
+        raise ConfigError(f"{field_name} must be one of: full, local, remote")
+    return action
+
+
+def _positive_int(value: Any, field_name: str) -> int:
+    try:
+        number = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ConfigError(f"{field_name} must be a positive integer") from exc
+    if number <= 0:
+        raise ConfigError(f"{field_name} must be a positive integer")
+    return number
+
+
+def _optional_positive_int(value: Any, field_name: str) -> int | None:
+    if value in (None, ""):
+        return None
+    return _positive_int(value, field_name)
 
 
 def _looks_like_github(url: str) -> bool:

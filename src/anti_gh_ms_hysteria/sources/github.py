@@ -103,5 +103,5 @@ class GitHubSource(SourceAdapter):
             archived=bool(raw.get("archived", False)),
             fork=bool(raw.get("fork", False)),
             visibility=visibility,
+            updated_at=raw.get("pushed_at") or raw.get("updated_at"),
         )
-
